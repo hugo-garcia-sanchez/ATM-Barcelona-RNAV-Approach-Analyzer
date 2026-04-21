@@ -1,0 +1,278 @@
+:root {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --line: rgb(0 123 177);
+  --title-frame: #343a40;
+  --text: #000000;
+  --text-soft: #000000;
+  --accent: rgb(0 123 177);
+  --warn: rgb(0 123 177);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.layout {
+  height: calc(100% - 58px);
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+  margin-top: 58px;
+}
+
+.top-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--line);
+  border-bottom: 2px solid var(--line);
+}
+
+.top-banner h1 {
+  margin: 0;
+  color: #000000;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.subsection-title {
+  border: 2px solid var(--title-frame);
+  color: #000000;
+  background: #ffffff;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  margin: 0;
+  letter-spacing: 0.3px;
+}
+
+h1 {
+  font-size: 1.35rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+}
+
+label {
+  font-size: 0.82rem;
+  color: #000000;
+}
+
+input,
+select,
+button {
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: var(--text);
+  padding: 10px;
+  font-family: inherit;
+}
+
+input:focus,
+select:focus,
+button:focus {
+  outline: 2px solid var(--line);
+  outline-offset: 2px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: progress;
+  opacity: 0.75;
+}
+
+button.action {
+  background: var(--accent);
+  color: #000000;
+  border: 1px solid var(--accent);
+  font-weight: 700;
+}
+
+button.ghost {
+  background: #ffffff;
+  color: #000000;
+}
+
+.sidebar-panel {
+  height: calc(100vh - 86px);
+  align-self: start;
+  position: sticky;
+  top: 72px;
+  overflow-y: auto;
+}
+
+.menu-group {
+  display: grid;
+  gap: 8px;
+}
+
+.content-column {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+}
+
+.map-panel {
+  padding: 12px;
+}
+
+.map-wrap {
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  position: relative;
+  aspect-ratio: 16 / 9;
+  min-height: min(62vh, 640px);
+  background: #ffffff;
+}
+
+.map {
+  width: 100%;
+  height: 100%;
+}
+
+.map-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.records-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.record-row {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  font-size: 0.82rem;
+}
+
+.record-row .meta {
+  color: var(--text-soft);
+  font-family: Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.75rem;
+}
+
+.hint {
+  color: #000000;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.stats {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  font-family: Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.toolbar {
+  display: grid;
+  gap: 8px;
+}
+
+.controls-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.actions-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.upload-label {
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: #000000;
+  padding: 10px;
+  cursor: pointer;
+}
+
+#uploadInput {
+  position: absolute;
+  left: -9999px;
+}
+
+.muted {
+  color: var(--text-soft);
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: calc(100% - 58px);
+  }
+
+  .sidebar-panel {
+    position: static;
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .map-wrap {
+    min-height: 320px;
+  }
+}
