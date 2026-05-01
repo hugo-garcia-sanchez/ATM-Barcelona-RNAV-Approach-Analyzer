@@ -1,493 +1,471 @@
-const API = "/api/datasets";
-const CENTER = { lat: 41.2974, lon: 2.0833 };
-const ZOOM = 11;
+/**
+ * ATM Analyzer - Main Application Logic
+ */
 
+// Constants
+const BARCELONA_CENTER = { lat: 41.2974, lng: 2.0833 };
+const DEFAULT_ZOOM = 12;
+const RUNWAY_24L = { lat: 41.2865, lng: 2.0759, name: "RWY 24L" };
+const RUNWAY_06R = { lat: 41.2870, lng: 2.0760, name: "RWY 06R" };
+
+// State Management
 const state = {
-	datasets: [],
-	inputFiles: [],
-	selectedDatasetId: "",
-	selectedInputFile: "P3_04h_08h.csv",
-	records: [],
-	summary: null,
-	flightFilter: "",
-	minAltitude: "",
-	maxAltitude: "",
-	status: "idle",
-	lastMessage: "Waiting for action",
-	loading: false,
-	websocket: null,
-	visibleRecords: [],
+  currentData: null,
+  allRecords: [],
+  displayRecords: [],
+  currentPage: 0,
+  pageSize: 500,  // FIX 3: Increased from 100 to 500 records per page
+  filters: {
+    minAlt: null,
+    maxAlt: null,
+    callsign: "",
+  },
+  map: null,
+  markers: {},
 };
 
-const app = document.getElementById("app");
+// ============================================
+// DOM ELEMENTS
+// ============================================
 
-async function readJsonSafe(response, fallback) {
-	const text = await response.text();
-	if (!text) return fallback;
-	try {
-		return JSON.parse(text);
-	} catch {
-		return fallback;
-	}
+const elements = {
+  statusText: document.getElementById("statusText"),
+  spinner: document.getElementById("spinner"),
+  uploadArea: document.getElementById("uploadArea"),
+  fileInput: document.getElementById("fileInput"),
+  browseBtn: document.getElementById("browseBtn"),
+  clearBtn: document.getElementById("clearBtn"),
+  datasetInfo: document.getElementById("datasetInfo"),
+  minAlt: document.getElementById("minAlt"),
+  maxAlt: document.getElementById("maxAlt"),
+  callsignFilter: document.getElementById("callsignFilter"),
+  filterBtn: document.getElementById("filterBtn"),
+  recordCount: document.getElementById("recordCount"),
+  tableBody: document.getElementById("tableBody"),
+  pageInfo: document.getElementById("pageInfo"),
+  prevPageBtn: document.getElementById("prevPageBtn"),
+  nextPageBtn: document.getElementById("nextPageBtn"),
+  exportBtn: document.getElementById("exportBtn"),
+  mapContainer: document.getElementById("map"),
+};
+
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+function setStatus(message, isLoading = false) {
+  elements.statusText.textContent = message;
+  if (isLoading) {
+    elements.spinner.classList.remove("hidden");
+  } else {
+    elements.spinner.classList.add("hidden");
+  }
 }
 
-function formatNumber(value) {
-	if (value === null || value === undefined || Number.isNaN(Number(value))) {
-		return "-";
-	}
-	return Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
+function formatCoordinate(value) {
+  return Number(value).toFixed(4);
 }
 
-function altitudeValue(record) {
-	const raw = record?.payload?.["H(ft)"];
-	const parsed = Number(raw);
-	return Number.isNaN(parsed) ? null : parsed;
+function formatAltitude(value) {
+  return value ? Number(value).toLocaleString() : "-";
 }
 
-function flightTag(record) {
-	return String(record?.payload?.TI || record?.label || "").toLowerCase();
+function formatTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return date.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatSpeed(value) {
+  return value ? Number(value).toFixed(1) : "-";
+}
+
+// ============================================
+// UPLOAD HANDLERS
+// ============================================
+
+function setupUploadHandlers() {
+  // File input change
+  elements.fileInput.addEventListener("change", (e) => {
+    const files = e.target.files;
+    if (files.length > 0) {
+      handleFileUpload(files[0]);
+    }
+  });
+
+  // Browse button
+  elements.browseBtn.addEventListener("click", () => {
+    elements.fileInput.click();
+  });
+
+  // Drag and drop
+  elements.uploadArea.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    elements.uploadArea.classList.add("dragover");
+  });
+
+  elements.uploadArea.addEventListener("dragleave", () => {
+    elements.uploadArea.classList.remove("dragover");
+  });
+
+  elements.uploadArea.addEventListener("drop", (e) => {
+    e.preventDefault();
+    elements.uploadArea.classList.remove("dragover");
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      handleFileUpload(files[0]);
+    }
+  });
+
+  // Clear button
+  elements.clearBtn.addEventListener("click", clearData);
+}
+
+async function handleFileUpload(file) {
+  setStatus(`Uploading ${file.name}...`, true);
+
+  try {
+    const result = await api.uploadCSV(file);
+    setStatus(`Loaded: ${result.filename} (${result.rows} rows)`, false);
+
+    // Update UI
+    updateDatasetInfo(result);
+    initializeMap();  // Initialize map FIRST
+    loadTableData();  // Then load data (which triggers updateMapMarkers)
+
+    elements.clearBtn.disabled = false;
+    elements.exportBtn.disabled = false;
+  } catch (error) {
+    setStatus(`Error: ${error.message}`, false);
+    alert(`Upload failed: ${error.message}`);
+  }
+}
+
+function clearData() {
+  state.currentData = null;
+  state.allRecords = [];
+  state.displayRecords = [];
+  state.currentPage = 0;
+
+  elements.datasetInfo.innerHTML = "<p>No data loaded</p>";
+  elements.tableBody.innerHTML =
+    '<tr><td colspan="6" class="center-text">No data loaded. Upload a CSV file to begin.</td></tr>';
+  elements.recordCount.textContent = "0 records";
+  elements.clearBtn.disabled = true;
+  elements.exportBtn.disabled = true;
+
+  // FIX 5: Reset file input so "Choose File" works again
+  elements.fileInput.value = "";
+
+  setStatus("Data cleared", false);
+
+  // Clear map
+  if (state.map) {
+    Object.values(state.markers).forEach((marker) => state.map.removeLayer(marker));
+    state.markers = {};
+  }
+}
+
+// ============================================
+// DATA LOADING
+// ============================================
+
+async function loadTableData() {
+  setStatus("Loading data...", true);
+
+  try {
+    const response = await api.getData(10000, 0);
+    state.allRecords = response.rows;
+    state.displayRecords = response.rows;
+
+    applyFilters();
+    renderTablePage();
+    setStatus("Data loaded", false);
+  } catch (error) {
+    setStatus(`Error loading data: ${error.message}`, false);
+    alert(`Failed to load data: ${error.message}`);
+  }
+}
+
+function updateDatasetInfo(info) {
+  const html = `
+    <p><strong>File:</strong> ${info.filename}</p>
+    <p><strong>Rows:</strong> ${info.rows.toLocaleString()}</p>
+    <p><strong>Columns:</strong> ${info.columns}</p>
+  `;
+  elements.datasetInfo.innerHTML = html;
+  state.currentData = info;
+}
+
+// ============================================
+// FILTERING
+// ============================================
+
+function setupFilterHandlers() {
+  elements.filterBtn.addEventListener("click", applyFilters);
+
+  [elements.minAlt, elements.maxAlt, elements.callsignFilter].forEach((input) => {
+    input.addEventListener("keypress", (e) => {
+      if (e.key === "Enter") applyFilters();
+    });
+  });
 }
 
 function applyFilters() {
-	state.visibleRecords = state.records.filter((record) => {
-		if (record.latitude === null || record.longitude === null) {
-			return false;
-		}
+  const minAlt = elements.minAlt.value ? parseFloat(elements.minAlt.value) : null;
+  const maxAlt = elements.maxAlt.value ? parseFloat(elements.maxAlt.value) : null;
+  const callsign = elements.callsignFilter.value.toUpperCase();
 
-		if (state.flightFilter && !flightTag(record).includes(state.flightFilter.toLowerCase())) {
-			return false;
-		}
+  // FIX 4: Debug logging for filters
+  console.log("Filters applied:", { minAlt, maxAlt, callsign, totalRecords: state.allRecords.length });
 
-		const altitude = altitudeValue(record);
-		if (state.minAltitude && altitude !== null && altitude < Number(state.minAltitude)) {
-			return false;
-		}
-		if (state.maxAltitude && altitude !== null && altitude > Number(state.maxAltitude)) {
-			return false;
-		}
+  state.filters = { minAlt, maxAlt, callsign };
 
-		return true;
-	});
+  state.displayRecords = state.allRecords.filter((record) => {
+    if (minAlt !== null && record.altitude < minAlt) return false;
+    if (maxAlt !== null && record.altitude > maxAlt) return false;
+    if (callsign && !record.callsign?.toUpperCase().includes(callsign)) return false;
+    return true;
+  });
+
+  console.log("After filter:", state.displayRecords.length, "records");
+
+  state.currentPage = 0;
+  renderTablePage();
+  updateMapMarkers();
+
+  setStatus(`Filtered: ${state.displayRecords.length} records`, false);
 }
 
-function mapBounds(records) {
-	const latSpan = 0.65 / Math.max(1, ZOOM / 10);
-	const lonSpan = 0.95 / Math.max(1, ZOOM / 10);
-	let minLat = CENTER.lat - latSpan;
-	let maxLat = CENTER.lat + latSpan;
-	let minLon = CENTER.lon - lonSpan;
-	let maxLon = CENTER.lon + lonSpan;
+// ============================================
+// TABLE RENDERING
+// ============================================
 
-	for (const record of records) {
-		if (record.latitude === null || record.longitude === null) continue;
-		minLat = Math.min(minLat, record.latitude);
-		maxLat = Math.max(maxLat, record.latitude);
-		minLon = Math.min(minLon, record.longitude);
-		maxLon = Math.max(maxLon, record.longitude);
-	}
+function renderTablePage() {
+  const start = state.currentPage * state.pageSize;
+  const end = start + state.pageSize;
+  const pageRecords = state.displayRecords.slice(start, end);
 
-	const latPadding = Math.max(0.02, (maxLat - minLat) * 0.12);
-	const lonPadding = Math.max(0.02, (maxLon - minLon) * 0.12);
-	return {
-		minLat: minLat - latPadding,
-		maxLat: maxLat + latPadding,
-		minLon: minLon - lonPadding,
-		maxLon: maxLon + lonPadding,
-	};
+  const tbody = elements.tableBody;
+  const thead = elements.tableBody.parentElement.querySelector("thead");
+  
+  // FIX 2: Generate columns dynamically from first record
+  if (pageRecords.length > 0 && state.displayRecords.length > 0) {
+    const firstRecord = state.displayRecords[0];
+    const columns = Object.keys(firstRecord);
+    
+    // Update header
+    const headerRow = thead.querySelector("tr");
+    headerRow.innerHTML = columns.map(col => `<th>${col}</th>`).join("");
+  }
+
+  tbody.innerHTML = "";
+
+  if (pageRecords.length === 0) {
+    const colCount = state.displayRecords.length > 0 ? Object.keys(state.displayRecords[0]).length : 6;
+    tbody.innerHTML =
+      `<tr><td colspan="${colCount}" class="center-text">No records match the filters</td></tr>`;
+  } else {
+    pageRecords.forEach((record) => {
+      const row = document.createElement("tr");
+      const columns = Object.keys(record);
+      const cells = columns.map(col => {
+        const value = record[col];
+        // Format special columns
+        if (col === "time") return formatTime(value);
+        if (col === "latitude" || col === "longitude") return formatCoordinate(value);
+        if (col === "altitude") return formatAltitude(value);
+        if (col === "speed") return formatSpeed(value);
+        return value || "-";
+      });
+      row.innerHTML = cells.map(cell => `<td>${cell}</td>`).join("");
+      tbody.appendChild(row);
+    });
+  }
+
+  const totalPages = Math.ceil(state.displayRecords.length / state.pageSize);
+  elements.pageInfo.textContent = `Page ${state.currentPage + 1} of ${Math.max(1, totalPages)}`;
+  elements.prevPageBtn.disabled = state.currentPage === 0;
+  elements.nextPageBtn.disabled = state.currentPage >= totalPages - 1;
+
+  elements.recordCount.textContent = `${state.displayRecords.length} records`;
 }
 
-function projectPoint(lat, lon, bounds, width, height) {
-	const x = ((lon - bounds.minLon) / Math.max(bounds.maxLon - bounds.minLon, 0.0001)) * width;
-	const y = height - ((lat - bounds.minLat) / Math.max(bounds.maxLat - bounds.minLat, 0.0001)) * height;
-	return { x, y };
+function setupPaginationHandlers() {
+  elements.prevPageBtn.addEventListener("click", () => {
+    if (state.currentPage > 0) {
+      state.currentPage--;
+      renderTablePage();
+    }
+  });
+
+  elements.nextPageBtn.addEventListener("click", () => {
+    const totalPages = Math.ceil(state.displayRecords.length / state.pageSize);
+    if (state.currentPage < totalPages - 1) {
+      state.currentPage++;
+      renderTablePage();
+    }
+  });
 }
 
-function drawGrid(context, width, height) {
-	context.save();
-	context.strokeStyle = "rgba(0, 123, 177, 0.15)";
-	context.lineWidth = 1;
-	for (let x = 0; x <= width; x += width / 8) {
-		context.beginPath();
-		context.moveTo(x, 0);
-		context.lineTo(x, height);
-		context.stroke();
-	}
-	for (let y = 0; y <= height; y += height / 6) {
-		context.beginPath();
-		context.moveTo(0, y);
-		context.lineTo(width, y);
-		context.stroke();
-	}
-	context.restore();
+// ============================================
+// MAP FUNCTIONS
+// ============================================
+
+function initializeMap() {
+  if (state.map) return;
+
+  state.map = L.map(elements.mapContainer).setView(BARCELONA_CENTER, DEFAULT_ZOOM);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap contributors",
+    maxZoom: 19,
+  }).addTo(state.map);
+
+  L.circleMarker(RUNWAY_24L, {
+    radius: 8,
+    color: "red",
+    weight: 2,
+    fillOpacity: 0.5,
+    fillColor: "red",
+  })
+    .bindPopup(`${RUNWAY_24L.name} - Threshold`)
+    .addTo(state.map);
+
+  L.circleMarker(RUNWAY_06R, {
+    radius: 8,
+    color: "red",
+    weight: 2,
+    fillOpacity: 0.5,
+    fillColor: "red",
+  })
+    .bindPopup(`${RUNWAY_06R.name} - Threshold`)
+    .addTo(state.map);
+
+  updateMapMarkers();
 }
 
-function renderMap() {
-	const canvas = document.getElementById("mapCanvas");
-	const context = canvas?.getContext("2d");
-	if (!canvas || !context) return;
+function updateMapMarkers() {
+  if (!state.map) return;  // Exit if map not initialized
+  
+  Object.values(state.markers).forEach((marker) => state.map.removeLayer(marker));
+  state.markers = {};
 
-	const rect = canvas.getBoundingClientRect();
-	const width = Math.max(1, Math.floor(rect.width));
-	const height = Math.max(1, Math.floor(rect.height));
-	const ratio = window.devicePixelRatio || 1;
+  state.displayRecords.forEach((record, idx) => {
+    const marker = L.circleMarker(
+      { lat: record.latitude, lng: record.longitude },
+      {
+        radius: 5,
+        color: "#0077B6",
+        weight: 1,
+        fillOpacity: 0.7,
+        fillColor: "#0077B6",
+      }
+    );
 
-	canvas.width = Math.floor(width * ratio);
-	canvas.height = Math.floor(height * ratio);
-	canvas.style.width = `${width}px`;
-	canvas.style.height = `${height}px`;
-	context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const popupContent = `
+      <strong>${record.callsign || "Unknown"}</strong><br>
+      Lat: ${formatCoordinate(record.latitude)}<br>
+      Lon: ${formatCoordinate(record.longitude)}<br>
+      Alt: ${formatAltitude(record.altitude)} ft<br>
+      Time: ${formatTime(record.time)}<br>
+      Speed: ${formatSpeed(record.speed)} kts
+    `;
 
-	context.clearRect(0, 0, width, height);
-	context.fillStyle = "#ffffff";
-	context.fillRect(0, 0, width, height);
-
-	drawGrid(context, width, height);
-
-	const bounds = mapBounds(state.visibleRecords);
-	const center = projectPoint(CENTER.lat, CENTER.lon, bounds, width, height);
-
-	context.fillStyle = "rgba(0, 123, 177, 0.15)";
-	context.beginPath();
-	context.arc(center.x, center.y, 8, 0, Math.PI * 2);
-	context.fill();
-
-	context.strokeStyle = "rgb(0, 123, 177)";
-	context.lineWidth = 2;
-	context.beginPath();
-	context.arc(center.x, center.y, 4, 0, Math.PI * 2);
-	context.stroke();
-
-	for (const record of state.visibleRecords.slice(0, 4000)) {
-		const point = projectPoint(record.latitude, record.longitude, bounds, width, height);
-		context.fillStyle = "rgb(0, 123, 177)";
-		context.beginPath();
-		context.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
-		context.fill();
-	}
-
-	context.fillStyle = "#000000";
-	context.font = "600 13px Roboto, Helvetica, Arial, sans-serif";
-	context.fillText("Barcelona sector", 16, 24);
-	context.font = "12px Roboto, Helvetica, Arial, sans-serif";
-	context.fillText(`Visible points: ${formatNumber(state.visibleRecords.length)}`, 16, 42);
+    marker.bindPopup(popupContent);
+    marker.addTo(state.map);
+    state.markers[idx] = marker;
+  });
 }
 
-function renderRecordList() {
-	const container = document.getElementById("recordList");
-	if (!container) return;
-	container.innerHTML = "";
+// ============================================
+// TAB SWITCHING
+// ============================================
 
-	for (const record of state.visibleRecords.slice(0, 24)) {
-		const row = document.createElement("div");
-		row.className = "record-row";
-		row.innerHTML = `
-			<div>${record.payload?.TI || record.label || "Unknown"}</div>
-			<div class="meta">${record.payload?.Time || "-"} · ${formatNumber(record.payload?.["H(ft)"])} ft · ${formatNumber(record.payload?.["GS(kt)"])} kt</div>
-		`;
-		container.appendChild(row);
-	}
+function setupTabHandlers() {
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
 
-	if (state.visibleRecords.length === 0) {
-		const empty = document.createElement("div");
-		empty.className = "hint";
-		empty.textContent = "No records match the current filters.";
-		container.appendChild(empty);
-	}
+      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+
+      document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+      document.getElementById(`${tab}Tab`).classList.add("active");
+
+      // FIX 1: Ensure map renders properly when tab becomes visible
+      if (tab === "map") {
+        setTimeout(() => {
+          if (state.map) {
+            state.map.invalidateSize();
+          } else {
+            initializeMap();
+          }
+        }, 100);
+      }
+    });
+  });
 }
 
-function renderApp() {
-	app.innerHTML = `
-		<header class="top-banner">
-			<h1>BCN ATM ANALYZER</h1>
-		</header>
-		<div class="layout">
-			<aside class="panel sidebar-panel">
-				<section class="menu-group">
-					<div class="subsection-title">Data</div>
-					<div class="controls-grid">
-						<div>
-							<label for="datasetSelect">Dataset</label>
-							<select id="datasetSelect">
-								<option value="">Select dataset</option>
-								${state.datasets.map((dataset) => `<option value="${dataset.id}">#${dataset.id} - ${dataset.filename}</option>`).join("")}
-							</select>
-						</div>
-						<div>
-							<label for="inputFileSelect">Import from data/inputs</label>
-							<select id="inputFileSelect">
-								<option value="">Select CSV</option>
-								${state.inputFiles.map((file) => `<option value="${file.filename}">${file.filename} (${Math.round(file.size_bytes / 1024)} KB)</option>`).join("")}
-							</select>
-						</div>
-					</div>
-				</section>
+// ============================================
+// EXPORT FUNCTIONS
+// ============================================
 
-				<section class="menu-group">
-					<div class="subsection-title">Filters</div>
-					<div class="controls-grid">
-						<div>
-							<label for="flightFilter">Flight tag filter</label>
-							<input id="flightFilter" type="text" placeholder="RYR, VLG, BCS..." value="${state.flightFilter}" />
-						</div>
-						<div>
-							<label for="minAltitude">Min altitude (ft)</label>
-							<input id="minAltitude" type="number" value="${state.minAltitude}" />
-						</div>
-						<div>
-							<label for="maxAltitude">Max altitude (ft)</label>
-							<input id="maxAltitude" type="number" value="${state.maxAltitude}" />
-						</div>
-					</div>
-				</section>
-
-				<section class="menu-group">
-					<div class="subsection-title">Actions</div>
-					<div class="actions-row">
-						<button class="ghost" id="refreshButton">Refresh snapshot</button>
-						<button class="action" id="importButton" ${state.loading ? "disabled" : ""}>${state.loading ? "Processing..." : "Import selected CSV"}</button>
-						<label class="upload-label" for="uploadInput">Upload CSV</label>
-						<input id="uploadInput" type="file" accept=".csv" />
-					</div>
-				</section>
-
-				<section class="menu-group">
-					<div class="subsection-title">Summary</div>
-					<div class="stats">
-						<div>Total: ${formatNumber(state.summary?.total_records)}</div>
-						<div>Geo: ${formatNumber(state.summary?.geo_records)}</div>
-						<div>Visible: ${formatNumber(state.visibleRecords.length)}</div>
-					</div>
-				</section>
-			</aside>
-
-			<section class="content-column">
-				<main class="panel map-panel">
-					<div class="subsection-title">Map</div>
-					<div class="map-wrap">
-						<canvas id="mapCanvas" class="map-canvas"></canvas>
-					</div>
-				</main>
-
-				<section class="panel records-panel">
-					<div class="subsection-title">Records</div>
-					<div class="muted">Current dataset: ${state.selectedDatasetId || "none"}</div>
-					<div class="muted">Current input: ${state.selectedInputFile || "none"}</div>
-					<div class="records-list" id="recordList"></div>
-				</section>
-			</section>
-		</div>
-	`;
-
-	const datasetSelect = document.getElementById("datasetSelect");
-	const inputFileSelect = document.getElementById("inputFileSelect");
-	const flightFilter = document.getElementById("flightFilter");
-	const minAltitude = document.getElementById("minAltitude");
-	const maxAltitude = document.getElementById("maxAltitude");
-	const refreshButton = document.getElementById("refreshButton");
-	const importButton = document.getElementById("importButton");
-	const uploadInput = document.getElementById("uploadInput");
-
-	datasetSelect.value = state.selectedDatasetId;
-	inputFileSelect.value = state.selectedInputFile;
-
-	datasetSelect.addEventListener("change", async (event) => {
-		state.selectedDatasetId = event.target.value;
-		if (state.selectedDatasetId) {
-			await loadDatasetData(state.selectedDatasetId);
-			connectWebSocket(state.selectedDatasetId);
-			render();
-		}
-	});
-
-	inputFileSelect.addEventListener("change", (event) => {
-		state.selectedInputFile = event.target.value;
-		render();
-	});
-
-	flightFilter.addEventListener("input", (event) => {
-		state.flightFilter = event.target.value;
-		render();
-	});
-
-	minAltitude.addEventListener("input", (event) => {
-		state.minAltitude = event.target.value;
-		render();
-	});
-
-	maxAltitude.addEventListener("input", (event) => {
-		state.maxAltitude = event.target.value;
-		render();
-	});
-
-	refreshButton.addEventListener("click", () => {
-		if (state.selectedDatasetId) loadDatasetData(state.selectedDatasetId);
-	});
-
-	importButton.addEventListener("click", importExistingInput);
-	uploadInput.addEventListener("change", (event) => uploadCsv(event.target.files?.[0]));
-
-	renderRecordList();
-	renderMap();
+function setupExportHandlers() {
+  elements.exportBtn.addEventListener("click", exportToCSV);
 }
 
-async function loadDatasets() {
-	const response = await fetch(API);
-	const payload = await readJsonSafe(response, []);
-	state.datasets = Array.isArray(payload) ? payload : [];
-	if (!state.selectedDatasetId && state.datasets.length > 0) {
-		state.selectedDatasetId = String(state.datasets[0].id);
-	}
+function exportToCSV() {
+  if (state.displayRecords.length === 0) {
+    alert("No data to export");
+    return;
+  }
+
+  const headers = ["Callsign", "Latitude", "Longitude", "Altitude (ft)", "Time", "Speed (kts)"];
+  const rows = state.displayRecords.map((r) => [
+    r.callsign || "",
+    r.latitude,
+    r.longitude,
+    r.altitude,
+    r.time,
+    r.speed || "",
+  ]);
+
+  const csv = [headers, ...rows].map((row) => row.map((cell) => `"${cell}"`).join(",")).join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `atm_data_${new Date().getTime()}.csv`;
+  link.click();
+
+  setStatus("Data exported", false);
 }
 
-async function loadInputFiles() {
-	const response = await fetch(`${API}/input-files`);
-	const payload = await readJsonSafe(response, []);
-	state.inputFiles = Array.isArray(payload) ? payload : [];
-	if (state.inputFiles.length > 0 && !state.selectedInputFile) {
-		state.selectedInputFile = state.inputFiles[0].filename;
-	}
+// ============================================
+// INITIALIZATION
+// ============================================
+
+function initializeApp() {
+  console.log("ATM Analyzer - Initializing...");
+
+  setupUploadHandlers();
+  setupFilterHandlers();
+  setupPaginationHandlers();
+  setupTabHandlers();
+  setupExportHandlers();
+
+  setStatus("Ready", false);
+
+  console.log("✅ Application ready");
 }
 
-async function loadDatasetData(datasetId) {
-	if (!datasetId) return;
-	const [summaryResponse, recordsResponse] = await Promise.all([
-		fetch(`${API}/${datasetId}/summary`),
-		fetch(`${API}/${datasetId}/records?limit=5000&offset=0`),
-	]);
-
-	if (!summaryResponse.ok || !recordsResponse.ok) {
-		state.summary = null;
-		state.records = [];
-		applyFilters();
-		render();
-		return;
-	}
-
-	state.summary = await readJsonSafe(summaryResponse, null);
-	const recordsPayload = await readJsonSafe(recordsResponse, []);
-	state.records = Array.isArray(recordsPayload) ? recordsPayload : [];
-	applyFilters();
-	render();
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initializeApp);
+} else {
+  initializeApp();
 }
-
-async function importExistingInput() {
-	if (!state.selectedInputFile) return;
-	state.loading = true;
-	render();
-
-	const response = await fetch(`${API}/import-existing/${encodeURIComponent(state.selectedInputFile)}`, { method: "POST" });
-	const payload = await readJsonSafe(response, {});
-	state.loading = false;
-
-	if (!response.ok) {
-		state.status = "error";
-		state.lastMessage = payload.detail || "Import failed";
-		render();
-		return;
-	}
-
-	state.status = "connected";
-	state.lastMessage = `Dataset imported with id ${payload.id}`;
-	await loadDatasets();
-	state.selectedDatasetId = String(payload.id);
-	await loadDatasetData(String(payload.id));
-	connectWebSocket(String(payload.id));
-	render();
-}
-
-async function uploadCsv(file) {
-	if (!file) return;
-	state.loading = true;
-	render();
-
-	const formData = new FormData();
-	formData.append("upload_file", file);
-	const response = await fetch(`${API}/upload`, { method: "POST", body: formData });
-	const payload = await readJsonSafe(response, {});
-	state.loading = false;
-
-	if (!response.ok) {
-		state.status = "error";
-		state.lastMessage = payload.detail || "Upload failed";
-		render();
-		return;
-	}
-
-	state.status = "connected";
-	state.lastMessage = `Upload completed with id ${payload.id}`;
-	await loadDatasets();
-	state.selectedDatasetId = String(payload.id);
-	await loadDatasetData(String(payload.id));
-	connectWebSocket(String(payload.id));
-	render();
-}
-
-function disconnectSocket() {
-	if (state.websocket) {
-		state.websocket.close();
-		state.websocket = null;
-	}
-}
-
-function connectWebSocket(datasetId) {
-	if (!datasetId) return;
-	disconnectSocket();
-	const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-	const socket = new WebSocket(`${protocol}://${window.location.host}/ws/datasets/${datasetId}`);
-	state.websocket = socket;
-
-	socket.onopen = () => {
-		state.status = "connected";
-	};
-
-	socket.onmessage = async (event) => {
-		let data;
-		try {
-			data = JSON.parse(event.data);
-		} catch {
-			return;
-		}
-		if (data.type === "snapshot") {
-			await loadDatasetData(datasetId);
-		} else if (data.type === "error") {
-			state.status = "error";
-			render();
-		}
-	};
-
-	socket.onerror = () => {
-		state.status = "error";
-		render();
-	};
-
-	socket.onclose = () => {
-		state.status = "idle";
-		render();
-	};
-}
-
-async function bootstrap() {
-	await loadDatasets();
-	await loadInputFiles();
-	applyFilters();
-	render();
-
-	if (state.selectedDatasetId) {
-		await loadDatasetData(state.selectedDatasetId);
-		connectWebSocket(state.selectedDatasetId);
-	}
-	render();
-
-	window.addEventListener("resize", renderMap);
-	window.addEventListener("beforeunload", disconnectSocket);
-}
-
-function render() {
-	applyFilters();
-	renderApp();
-}
-
-bootstrap().catch((error) => {
-	console.error(error);
-	app.innerHTML = `<div class="panel" style="margin: 16px;">Failed to start application: ${error.message}</div>`;
-});

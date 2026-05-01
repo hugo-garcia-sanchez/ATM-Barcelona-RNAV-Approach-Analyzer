@@ -50,5 +50,21 @@ class InputFileInfo(BaseModel):
     size_bytes: int
 
 
+class DataRecordMVP(BaseModel):
+    callsign: str | None = None
+    aircraft_id: str | None = None
+    latitude: float
+    longitude: float
+    altitude: float
+    time: str
+    speed: float | None = None
+
+
+class DataResponseMVP(BaseModel):
+    total_rows: int
+    returned_rows: int
+    rows: list[DataRecordMVP]
+
+
 class UploadDeleteResponse(BaseModel):
     deleted: bool

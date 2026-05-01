@@ -1,13 +1,144 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ATM Analyzer - BCN Radar</title>
-    <link rel="stylesheet" href="/frontend/styles.css" />
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/frontend/main.js"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ATM Analyzer - Barcelona</title>
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/frontend/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <h1>🛫 ATM Barcelona - Runway Analysis</h1>
+      <div class="header-status">
+        <span id="statusText">Ready</span>
+        <div id="spinner" class="spinner hidden"></div>
+      </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div class="container">
+      <!-- Sidebar: Upload & Info -->
+      <aside class="sidebar">
+        <div class="panel">
+          <h2>📁 Upload Data</h2>
+          <div class="upload-area" id="uploadArea">
+            <input 
+              type="file" 
+              id="fileInput" 
+              accept=".csv" 
+              style="display: none;" 
+            />
+            <div class="upload-placeholder">
+              <p>📤 Drag CSV here or click to select</p>
+              <small>Format: Latitude, Longitude, Altitude, Time</small>
+            </div>
+          </div>
+          <button id="browseBtn" class="button button-primary">Choose File</button>
+          <button id="clearBtn" class="button button-secondary" disabled>Clear Data</button>
+        </div>
+
+        <div class="panel">
+          <h2>ℹ️ Dataset Info</h2>
+          <div id="datasetInfo" class="info-box">
+            <p>No data loaded</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>⚙️ Filters</h2>
+          <div class="filter-group">
+            <label>Min Altitude (ft)</label>
+            <input 
+              type="number" 
+              id="minAlt" 
+              placeholder="0"
+              class="input"
+            />
+          </div>
+          <div class="filter-group">
+            <label>Max Altitude (ft)</label>
+            <input 
+              type="number" 
+              id="maxAlt" 
+              placeholder="50000"
+              class="input"
+            />
+          </div>
+          <div class="filter-group">
+            <label>Callsign Filter</label>
+            <input 
+              type="text" 
+              id="callsignFilter" 
+              placeholder="e.g., IB, BA"
+              class="input"
+            />
+          </div>
+          <button id="filterBtn" class="button button-primary">Apply Filters</button>
+        </div>
+      </aside>
+
+      <!-- Main Content: Table & Map -->
+      <main class="main-content">
+        <!-- Tab Navigation -->
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="table">📊 Table</button>
+          <button class="tab-btn" data-tab="map">🗺️ Map</button>
+        </div>
+
+        <!-- Table Tab -->
+        <div id="tableTab" class="tab-content active">
+          <div class="table-container">
+            <div class="table-header">
+              <span id="recordCount">0 records</span>
+              <div class="table-actions">
+                <button id="exportBtn" class="button button-small" disabled>📥 Export CSV</button>
+              </div>
+            </div>
+            <table id="dataTable" class="data-table">
+              <thead>
+                <tr>
+                  <th>Callsign</th>
+                  <th>Latitude</th>
+                  <th>Longitude</th>
+                  <th>Altitude (ft)</th>
+                  <th>Time</th>
+                  <th>Speed (kts)</th>
+                </tr>
+              </thead>
+              <tbody id="tableBody">
+                <tr><td colspan="6" class="center-text">No data loaded. Upload a CSV file to begin.</td></tr>
+              </tbody>
+            </table>
+            <div class="table-pagination">
+              <button id="prevPageBtn" class="button button-small" disabled>← Prev</button>
+              <span id="pageInfo">Page 1</span>
+              <button id="nextPageBtn" class="button button-small" disabled>Next →</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Map Tab -->
+        <div id="mapTab" class="tab-content">
+          <div id="map" class="map-container"></div>
+          <div class="map-legend">
+            <div class="legend-item">
+              <span class="legend-color" style="background: #0077B6;"></span> Aircraft Position
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- App Scripts -->
+  <script src="/frontend/api-client.js"></script>
+  <script src="/frontend/main.js"></script>
+</body>
 </html>

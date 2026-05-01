@@ -3,12 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+import pandas as pd
 
 from ...config import get_settings
 from ...database import get_db
 from ...database import delete_upload, fetch_records, fetch_summary, fetch_upload, fetch_uploads
-from ...schemas import DatasetRecordOut, DatasetSummary, InputFileInfo, UploadListItem, UploadResponse
+from ...schemas import DatasetRecordOut, DatasetSummary, InputFileInfo, UploadListItem, UploadResponse, DataResponseMVP, DataRecordMVP
 from ...services.ingest import ingest_existing_file, ingest_upload
+from ...data_processing.csv_loader import CSVLoader
+from ...data_store import set_current_data, get_current_data, get_current_filename
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -91,3 +94,112 @@ def remove_upload(upload_id: int, db=Depends(get_db)) -> dict[str, bool]:
 
     delete_upload(db, upload_id)
     return {"deleted": True}
+
+
+# ============== MVP ENDPOINTS ==============
+
+@router.post("/mvp/upload", response_model=dict[str, str | int])
+async def mvp_upload(file: UploadFile = File(...)) -> dict[str, str | int]:
+    """Upload and process CSV file for MVP."""
+    try:
+        # Read file content
+        content = await file.read()
+        
+        # Load and validate CSV
+        loader = CSVLoader(file_content=content)
+        df = loader.load()
+        
+        # Store in memory
+        set_current_data(df, filename=file.filename)
+        
+        # Return status
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "rows": len(df),
+            "columns": len(df.columns),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@router.get("/mvp/data", response_model=DataResponseMVP)
+def mvp_get_data(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
+    """Get current loaded data as table records."""
+    df = get_current_data()
+    
+    if df is None:
+        raise HTTPException(status_code=404, detail="No data loaded. Please upload a CSV first.")
+    
+    # Get pagination slice
+    total_rows = len(df)
+    end_idx = min(offset + limit, total_rows)
+    slice_df = df.iloc[offset:end_idx]
+    
+    # Convert to response format
+    records = []
+    for _, row in slice_df.iterrows():
+        # Try to get callsign from multiple possible column names
+        callsign = None
+        for col in ["callsign", "registration", "tn", "ti"]:
+            if col in row.index and pd.notna(row[col]):
+                callsign = str(row[col])
+                break
+        
+        # Try to get aircraft_id
+        aircraft_id = None
+        for col in ["aircraft_id", "icao", "mode3/a"]:
+            if col in row.index and pd.notna(row[col]):
+                aircraft_id = str(row[col])
+                break
+        
+        # Get speed from possible columns
+        speed = None
+        for col in ["speed", "ias", "gs", "gs(kt)", "tas"]:
+            if col in row.index and pd.notna(row[col]):
+                try:
+                    speed = float(row[col])
+                    break
+                except (ValueError, TypeError):
+                    pass
+        
+        record = DataRecordMVP(
+            callsign=callsign,
+            aircraft_id=aircraft_id,
+            latitude=float(row["latitude"]),
+            longitude=float(row["longitude"]),
+            altitude=float(row["altitude"]),
+            time=pd.Timestamp(row["time"]).isoformat(),
+            speed=speed,
+        )
+        records.append(record)
+    
+    return DataResponseMVP(
+        total_rows=total_rows,
+        returned_rows=len(records),
+        rows=records,
+    )
+
+
+@router.get("/mvp/info", response_model=dict[str, str | int])
+def mvp_get_info() -> dict[str, str | int]:
+    """Get info about current loaded data."""
+    df = get_current_data()
+    filename = get_current_filename()
+    
+    if df is None:
+        return {
+            "status": "empty",
+            "rows": 0,
+            "columns": 0,
+            "filename": None,
+        }
+    
+    return {
+        "status": "loaded",
+        "filename": filename or "unknown",
+        "rows": len(df),
+        "columns": len(df.columns),
+    }
