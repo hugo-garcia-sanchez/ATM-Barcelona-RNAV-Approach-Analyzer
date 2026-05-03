@@ -226,6 +226,18 @@ class CSVLoader:
                     return pd.NaT
             
             df["time"] = df["time"].apply(parse_time_with_millis)
+
+            # Validate that at least some timestamps were parsed successfully
+            nat_count = df["time"].isna().sum()
+            if nat_count == len(df):
+                raise ValueError(
+                    "Time column could not be parsed. Expected HH:MM:SS:mmm or standard datetime format."
+                )
+            # Drop rows where time could not be parsed (NaT)
+            if nat_count > 0:
+                df = df.dropna(subset=["time"])
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Failed to parse time column: {str(e)}")
 
