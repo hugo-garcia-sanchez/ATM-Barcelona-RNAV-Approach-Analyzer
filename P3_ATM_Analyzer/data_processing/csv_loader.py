@@ -105,9 +105,12 @@ class CSVLoader:
             ValueError: If file is invalid or missing required columns
         """
         if self.file_path:
-            content = Path(self.file_path).read_text(encoding="utf-8")
+            try:
+                content = Path(self.file_path).read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                raise ValueError(f"Cannot read file: {e}")
         elif self.file_content:
-            content = self.file_content.decode("utf-8")
+            content = self.file_content.decode("utf-8", errors="replace")
         else:
             raise ValueError("Either file_path or file_content must be provided")
 

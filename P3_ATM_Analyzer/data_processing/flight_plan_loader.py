@@ -49,9 +49,9 @@ class FlightPlanLoader:
             DataFrame con columnas canonicas.
         """
         if file_path:
-            content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+            content = Path(file_path).read_text(encoding="utf-8", errors="replace")
         elif file_content:
-            content = file_content.decode("utf-8", errors="ignore")
+            content = file_content.decode("utf-8", errors="replace")
         else:
             raise ValueError("Proporcionar file_path o file_content")
 
