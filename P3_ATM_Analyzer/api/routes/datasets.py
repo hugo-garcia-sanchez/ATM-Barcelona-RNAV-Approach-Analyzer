@@ -210,6 +210,11 @@ async def mvp_upload_flight_plan(file: UploadFile = File(...)) -> dict[str, obje
 @router.get("/mvp/data", response_model=DataResponseMVP)
 def mvp_get_data(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
     """Get current loaded raw data as table records."""
+    if limit < 1 or limit > 10_000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 10000")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be non-negative")
+
     df = get_current_data()
 
     if df is None:
@@ -231,6 +236,11 @@ def mvp_get_data(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
 @router.get("/mvp/processed", response_model=DataResponseMVP)
 def mvp_get_processed(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
     """Get post-filter processed data (ASTERIX filters + QNH correction + stereo coords)."""
+    if limit < 1 or limit > 10_000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 10000")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be non-negative")
+
     df = get_processed_data()
 
     if df is None:
