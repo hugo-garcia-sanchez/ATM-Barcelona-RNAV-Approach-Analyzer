@@ -121,12 +121,17 @@ async def mvp_upload(file: UploadFile = File(...)) -> dict[str, object]:
         set_current_data(df_raw, filename=file.filename)
 
         # 2. Apply ASTERIX filters + QNH correction
+        filters_applied = True
         try:
             df_processed = AsterixProcessor(df_raw).process()
-        except Exception:
-            # If processor fails (e.g. non-ASTERIX CSV without expected columns),
-            # fall back to raw data so the app stays functional
+        except Exception as exc:
+            # Log failure explicitly so the caller knows filtering was skipped
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "ASTERIX processing failed, returning raw data: %s", exc
+            )
             df_processed = df_raw.copy()
+            filters_applied = False
 
         rows_after_filters = len(df_processed)
 
@@ -155,6 +160,7 @@ async def mvp_upload(file: UploadFile = File(...)) -> dict[str, object]:
             "rows": rows_raw,
             "rows_after_filters": rows_after_filters,
             "columns": len(df_processed.columns),
+            "filters_applied": filters_applied,
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
