@@ -70,14 +70,17 @@ def bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def add_stereo_columns(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Anade columnas x_m, y_m a un DataFrame con columnas latitude, longitude."""
-    import pandas as pd
-    coords = df.apply(
-        lambda r: wgs84_to_stereographic(r["latitude"], r["longitude"]), axis=1
-    )
+    """Anade columnas x_m, y_m a un DataFrame con columnas latitude, longitude.
+
+    Vectorised with numpy: avoids row-wise Python apply for large radar datasets.
+    """
+    lat0 = math.radians(LEBL_LAT0)
+    lon0 = math.radians(LEBL_LON0)
+    lat = np.radians(df["latitude"].to_numpy(dtype=float))
+    lon = np.radians(df["longitude"].to_numpy(dtype=float))
     df = df.copy()
-    df["x_m"] = [c[0] for c in coords]
-    df["y_m"] = [c[1] for c in coords]
+    df["x_m"] = EARTH_RADIUS_M * (lon - lon0) * math.cos(lat0)
+    df["y_m"] = EARTH_RADIUS_M * (lat - lat0)
     return df
 
 
