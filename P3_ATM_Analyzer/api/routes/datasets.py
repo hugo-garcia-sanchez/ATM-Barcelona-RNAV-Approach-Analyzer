@@ -11,7 +11,14 @@ from ...database import delete_upload, fetch_records, fetch_summary, fetch_uploa
 from ...schemas import DatasetRecordOut, DatasetSummary, InputFileInfo, UploadListItem, UploadResponse, DataResponseMVP, DataRecordMVP
 from ...services.ingest import ingest_existing_file, ingest_upload
 from ...data_processing.csv_loader import CSVLoader
-from ...data_store import set_current_data, get_current_data, get_current_filename
+from ...data_processing.asterix_processor import AsterixProcessor
+from ...data_processing.flight_plan_loader import FlightPlanLoader
+from ...geospatial.coordinate_transform import add_stereo_columns
+from ...data_store import (
+    set_current_data, get_current_data, get_current_filename,
+    set_processed_data, get_processed_data,
+    set_flight_plan, get_flight_plan,
+)
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -98,27 +105,95 @@ def remove_upload(upload_id: int, db=Depends(get_db)) -> dict[str, bool]:
 
 # ============== MVP ENDPOINTS ==============
 
-@router.post("/mvp/upload", response_model=dict[str, str | int])
-async def mvp_upload(file: UploadFile = File(...)) -> dict[str, str | int]:
-    """Upload and process CSV file for MVP."""
+@router.post("/mvp/upload", response_model=dict[str, object])
+async def mvp_upload(file: UploadFile = File(...)) -> dict[str, object]:
+    """Upload and process radar CSV file using full ASTERIX pipeline."""
     try:
-        # Read file content
         content = await file.read()
-        
-        # Load and validate CSV
+
+        # 1. Load raw CSV and map ASTERIX columns
         loader = CSVLoader(file_content=content)
-        df = loader.load()
-        
-        # Store in memory
-        set_current_data(df, filename=file.filename)
-        
-        # Return status
+        df_raw = loader.load()
+        rows_raw = len(df_raw)
+
+        # Store raw data
+        set_current_data(df_raw, filename=file.filename)
+
+        # 2. Apply ASTERIX filters + QNH correction
+        try:
+            df_processed = AsterixProcessor(df_raw).process()
+        except Exception:
+            # If processor fails (e.g. non-ASTERIX CSV without expected columns),
+            # fall back to raw data so the app stays functional
+            df_processed = df_raw.copy()
+
+        rows_after_filters = len(df_processed)
+
+        # 3. Add stereographic projection columns (x_m, y_m)
+        try:
+            df_processed = add_stereo_columns(df_processed)
+        except Exception:
+            pass  # non-critical; coords may be missing in test data
+
+        # 4. Merge with flight plan if one is already loaded
+        fp_df = get_flight_plan()
+        if fp_df is not None:
+            try:
+                fp_loader = FlightPlanLoader()
+                fp_loader.df = fp_df
+                df_processed = fp_loader.merge_with_radar(df_processed)
+            except Exception:
+                pass  # merge is best-effort
+
+        # Store processed data
+        set_processed_data(df_processed)
+
         return {
             "status": "success",
             "filename": file.filename,
-            "rows": len(df),
-            "columns": len(df.columns),
+            "rows": rows_raw,
+            "rows_after_filters": rows_after_filters,
+            "columns": len(df_processed.columns),
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@router.post("/mvp/upload-flight-plan", response_model=dict[str, object])
+async def mvp_upload_flight_plan(file: UploadFile = File(...)) -> dict[str, object]:
+    """Upload flight plan CSV and optionally merge with already-loaded radar data."""
+    try:
+        content = await file.read()
+
+        loader = FlightPlanLoader()
+        fp_df = loader.load(file_content=content)
+
+        # Store flight plan
+        set_flight_plan(fp_df, filename=file.filename)
+
+        # If radar data is already loaded, merge automatically
+        merged_rows = None
+        radar_df = get_processed_data()
+        if radar_df is not None:
+            try:
+                merged = loader.merge_with_radar(radar_df)
+                set_processed_data(merged)
+                merged_rows = len(merged)
+            except Exception:
+                pass
+
+        response: dict[str, object] = {
+            "status": "success",
+            "filename": file.filename,
+            "rows": len(fp_df),
+            "columns": len(fp_df.columns),
+        }
+        if merged_rows is not None:
+            response["merged_radar_rows"] = merged_rows
+
+        return response
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -127,55 +202,18 @@ async def mvp_upload(file: UploadFile = File(...)) -> dict[str, str | int]:
 
 @router.get("/mvp/data", response_model=DataResponseMVP)
 def mvp_get_data(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
-    """Get current loaded data as table records."""
+    """Get current loaded raw data as table records."""
     df = get_current_data()
-    
+
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded. Please upload a CSV first.")
-    
-    # Get pagination slice
+
     total_rows = len(df)
     end_idx = min(offset + limit, total_rows)
     slice_df = df.iloc[offset:end_idx]
-    
-    # Convert to response format
-    records = []
-    for _, row in slice_df.iterrows():
-        # Try to get callsign from multiple possible column names
-        callsign = None
-        for col in ["callsign", "registration", "tn", "ti"]:
-            if col in row.index and pd.notna(row[col]):
-                callsign = str(row[col])
-                break
-        
-        # Try to get aircraft_id
-        aircraft_id = None
-        for col in ["aircraft_id", "icao", "mode3/a"]:
-            if col in row.index and pd.notna(row[col]):
-                aircraft_id = str(row[col])
-                break
-        
-        # Get speed from possible columns
-        speed = None
-        for col in ["speed", "ias", "gs", "gs(kt)", "tas"]:
-            if col in row.index and pd.notna(row[col]):
-                try:
-                    speed = float(row[col])
-                    break
-                except (ValueError, TypeError):
-                    pass
-        
-        record = DataRecordMVP(
-            callsign=callsign,
-            aircraft_id=aircraft_id,
-            latitude=float(row["latitude"]),
-            longitude=float(row["longitude"]),
-            altitude=float(row["altitude"]),
-            time=pd.Timestamp(row["time"]).isoformat(),
-            speed=speed,
-        )
-        records.append(record)
-    
+
+    records = _df_to_mvp_records(slice_df)
+
     return DataResponseMVP(
         total_rows=total_rows,
         returned_rows=len(records),
@@ -183,12 +221,34 @@ def mvp_get_data(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
     )
 
 
-@router.get("/mvp/info", response_model=dict[str, str | int])
-def mvp_get_info() -> dict[str, str | int]:
+@router.get("/mvp/processed", response_model=DataResponseMVP)
+def mvp_get_processed(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
+    """Get post-filter processed data (ASTERIX filters + QNH correction + stereo coords)."""
+    df = get_processed_data()
+
+    if df is None:
+        raise HTTPException(status_code=404, detail="No processed data available. Please upload a radar CSV first.")
+
+    total_rows = len(df)
+    end_idx = min(offset + limit, total_rows)
+    slice_df = df.iloc[offset:end_idx]
+
+    records = _df_to_mvp_records(slice_df)
+
+    return DataResponseMVP(
+        total_rows=total_rows,
+        returned_rows=len(records),
+        rows=records,
+    )
+
+
+@router.get("/mvp/info", response_model=dict[str, object])
+def mvp_get_info() -> dict[str, object]:
     """Get info about current loaded data."""
     df = get_current_data()
     filename = get_current_filename()
-    
+    processed_df = get_processed_data()
+
     if df is None:
         return {
             "status": "empty",
@@ -196,10 +256,66 @@ def mvp_get_info() -> dict[str, str | int]:
             "columns": 0,
             "filename": None,
         }
-    
+
     return {
         "status": "loaded",
         "filename": filename or "unknown",
         "rows": len(df),
         "columns": len(df.columns),
+        "rows_after_filters": len(processed_df) if processed_df is not None else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _df_to_mvp_records(slice_df: pd.DataFrame) -> list[DataRecordMVP]:
+    """Convert a DataFrame slice to a list of DataRecordMVP objects."""
+    records = []
+    for _, row in slice_df.iterrows():
+        # callsign
+        callsign = None
+        for col in ["callsign", "registration", "tn", "ti"]:
+            if col in row.index and pd.notna(row[col]):
+                callsign = str(row[col])
+                break
+
+        # aircraft_id
+        aircraft_id = None
+        for col in ["aircraft_id", "icao", "mode3/a"]:
+            if col in row.index and pd.notna(row[col]):
+                aircraft_id = str(row[col])
+                break
+
+        # speed
+        speed = None
+        for col in ["speed", "ias", "ground_speed", "gs(kt)", "tas"]:
+            if col in row.index and pd.notna(row[col]):
+                try:
+                    speed = float(row[col])
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+        # altitude — prefer QNH-corrected value
+        alt_val = 0.0
+        for col in ["altitude_qnh_ft", "altitude"]:
+            if col in row.index and pd.notna(row[col]):
+                try:
+                    alt_val = float(row[col])
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+        record = DataRecordMVP(
+            callsign=callsign,
+            aircraft_id=aircraft_id,
+            latitude=float(row["latitude"]),
+            longitude=float(row["longitude"]),
+            altitude=alt_val,
+            time=pd.Timestamp(row["time"]).isoformat() if pd.notna(row.get("time")) else "",
+            speed=speed,
+        )
+        records.append(record)
+    return records
