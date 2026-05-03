@@ -54,9 +54,10 @@ class AsterixProcessor:
         """
         if "stat" not in self.df.columns:
             return self
-        # Excluir registros con 'ground' en stat (case insensitive) o stat=2 (on-ground)
+        # Excluir registros con 'ground' en stat (case insensitive).
+        # A single literal substring match covers on-ground, on_ground, on.ground, etc.
         stat_col = self.df["stat"].astype(str).str.lower()
-        mask = ~(stat_col.str.contains("ground") | stat_col.str.contains("on.ground"))
+        mask = ~stat_col.str.contains("ground", regex=False)
         self.df = self.df[mask].copy()
         return self
 
