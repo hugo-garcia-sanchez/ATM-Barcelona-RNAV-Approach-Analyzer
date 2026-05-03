@@ -86,13 +86,16 @@ class CSVLoader:
 
     @staticmethod
     def _detect_delimiter(content: str) -> str:
-        """Auto-detect CSV delimiter (;, ,, or |)."""
+        """Auto-detect CSV delimiter by frequency in the first line.
+
+        Uses the most-frequent candidate delimiter rather than the first found,
+        which avoids misdetection when a delimiter appears inside a field value.
+        """
         first_line = content.split("\n")[0] if content else ""
-        delimiters = [";", ",", "|", "\t"]
-        for delim in delimiters:
-            if delim in first_line:
-                return delim
-        return ","
+        candidates = [";", ",", "|", "\t"]
+        counts = {d: first_line.count(d) for d in candidates}
+        best = max(counts, key=counts.get)
+        return best if counts[best] > 0 else ","
 
     def load(self) -> pd.DataFrame:
         """
