@@ -6,6 +6,32 @@ from pathlib import Path
 import pandas as pd
 
 
+# ---------------------------------------------------------------------------
+# ASTERIX Cat048 column mapping patterns
+# Key = canonical name used throughout the application
+# Value = list of possible CSV column name variants (lowercase, stripped)
+# ---------------------------------------------------------------------------
+ASTERIX_COLUMN_PATTERNS: dict[str, list[str]] = {
+    "fl":            ["fl", "i090_fl", "flight_level", "i090"],
+    "tod":           ["tod", "i140_tod", "time_of_day"],
+    "track_number":  ["track", "i161", "track_number", "track_num"],
+    "stat":          ["stat", "i230_stat", "flight_status", "status"],
+    "callsign":      ["callsign", "tid", "i240_tid", "indicativo"],
+    "bp":            ["bp", "i250_bp", "baro_pressure", "barometric_pressure"],
+    "roll_angle":    ["roll_angle", "ra", "i250_ra", "roll"],
+    "tta":           ["tta", "true_track_angle", "true_track"],
+    "ground_speed":  ["gs", "ground_speed", "i250_gs"],
+    "tar":           ["tar", "track_angle_rate"],
+    "tas":           ["tas", "true_airspeed"],
+    "mh":            ["mh", "magnetic_heading"],
+    "ias":           ["ias", "indicated_airspeed", "indicated_air_speed"],
+    "baro_alt_rate": ["bar", "baro_alt_rate", "barometric_alt_rate"],
+    "ivv":           ["ivv", "inertial_vertical_velocity"],
+    "rho":           ["rho", "i040_rho"],
+    "theta":         ["theta", "i040_theta"],
+}
+
+
 class CSVLoader:
     """Loads and validates CSV files containing radar/flight data."""
 
@@ -24,6 +50,39 @@ class CSVLoader:
         self.file_content = file_content
         self.dataframe = None
         self.column_mapping = {}
+        self._asterix_columns_found: int = 0
+
+    def _map_asterix_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Detect and rename ASTERIX Cat048 columns to canonical names.
+
+        Iterates ASTERIX_COLUMN_PATTERNS and renames matching columns.
+        Columns not found are NOT added (remain absent / will appear as NaN
+        when accessed). No error is raised for missing optional fields.
+
+        Updates self._asterix_columns_found with the count of matched columns.
+        """
+        found_cols = set(df.columns)
+        rename_map: dict[str, str] = {}
+        matched = 0
+        for canonical, patterns in ASTERIX_COLUMN_PATTERNS.items():
+            # Skip if canonical name already exists (e.g. mapped in earlier step)
+            if canonical in found_cols:
+                matched += 1
+                continue
+            for pattern in patterns:
+                if pattern in found_cols:
+                    rename_map[pattern] = canonical
+                    matched += 1
+                    break
+        self._asterix_columns_found = matched
+        if rename_map:
+            df = df.rename(columns=rename_map)
+        return df
+
+    @property
+    def is_asterix_data(self) -> bool:
+        """Return True if at least 5 ASTERIX columns were detected in the last load()."""
+        return self._asterix_columns_found >= 5
 
     @staticmethod
     def _detect_delimiter(content: str) -> str:
@@ -69,6 +128,10 @@ class CSVLoader:
 
         # Normalize column names (lowercase, strip whitespace)
         df.columns = [col.strip().lower() for col in df.columns]
+
+        # Map ASTERIX-specific columns to canonical names BEFORE any other logic
+        df = self._map_asterix_columns(df)
+
         found_columns = set(df.columns)
 
         # Smart column mapping - find columns that match patterns
