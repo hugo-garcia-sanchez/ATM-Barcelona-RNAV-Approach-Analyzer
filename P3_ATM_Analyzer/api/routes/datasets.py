@@ -60,9 +60,10 @@ def import_existing_dataset(filename: str, db=Depends(get_db)) -> dict[str, obje
     source_path = (settings.upload_dir / filename).resolve()
     upload_root = settings.upload_dir.resolve()
 
-    if upload_root not in source_path.parents and source_path != upload_root:
+    # Correct containment check — no "or" branch that widens the allowed set
+    if not source_path.is_relative_to(upload_root):
         raise HTTPException(status_code=400, detail="Invalid file path")
-    if not source_path.exists() or source_path.suffix.lower() != ".csv":
+    if not source_path.is_file() or source_path.suffix.lower() != ".csv":
         raise HTTPException(status_code=404, detail="CSV file not found in inputs folder")
 
     return ingest_existing_file(db, source_path)
