@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -21,6 +22,7 @@ from ...data_store import (
 )
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+logger = logging.getLogger(__name__)
 
 
 def _store_upload_file(upload_file: UploadFile, destination_dir: Path) -> Path:
@@ -126,10 +128,7 @@ async def mvp_upload(file: UploadFile = File(...)) -> dict[str, object]:
             df_processed = AsterixProcessor(df_raw).process()
         except Exception as exc:
             # Log failure explicitly so the caller knows filtering was skipped
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "ASTERIX processing failed, returning raw data: %s", exc
-            )
+            logger.warning("ASTERIX processing failed, returning raw data: %s", exc)
             df_processed = df_raw.copy()
             filters_applied = False
 
@@ -142,19 +141,21 @@ async def mvp_upload(file: UploadFile = File(...)) -> dict[str, object]:
             pass  # non-critical; coords may be missing in test data
 
         # 4. Merge with flight plan if one is already loaded
+        merge_warning = None
         fp_df = get_flight_plan()
         if fp_df is not None:
             try:
                 fp_loader = FlightPlanLoader()
                 fp_loader.df = fp_df
                 df_processed = fp_loader.merge_with_radar(df_processed)
-            except Exception:
-                pass  # merge is best-effort
+            except Exception as exc:
+                merge_warning = str(exc)
+                logger.warning("Flight plan merge failed during radar upload: %s", exc)
 
         # Store processed data
         set_processed_data(df_processed)
 
-        return {
+        response_body: dict[str, object] = {
             "status": "success",
             "filename": file.filename,
             "rows": rows_raw,
@@ -162,6 +163,9 @@ async def mvp_upload(file: UploadFile = File(...)) -> dict[str, object]:
             "columns": len(df_processed.columns),
             "filters_applied": filters_applied,
         }
+        if merge_warning:
+            response_body["merge_warning"] = merge_warning
+        return response_body
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -182,14 +186,16 @@ async def mvp_upload_flight_plan(file: UploadFile = File(...)) -> dict[str, obje
 
         # If radar data is already loaded, merge automatically
         merged_rows = None
+        merge_warning = None
         radar_df = get_processed_data()
         if radar_df is not None:
             try:
                 merged = loader.merge_with_radar(radar_df)
                 set_processed_data(merged)
                 merged_rows = len(merged)
-            except Exception:
-                pass
+            except Exception as exc:
+                merge_warning = str(exc)
+                logger.warning("Flight plan merge failed during flight-plan upload: %s", exc)
 
         response: dict[str, object] = {
             "status": "success",
@@ -199,6 +205,8 @@ async def mvp_upload_flight_plan(file: UploadFile = File(...)) -> dict[str, obje
         }
         if merged_rows is not None:
             response["merged_radar_rows"] = merged_rows
+        if merge_warning:
+            response["merge_warning"] = merge_warning
 
         return response
     except ValueError as e:
