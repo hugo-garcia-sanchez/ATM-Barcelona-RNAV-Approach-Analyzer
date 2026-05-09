@@ -51,13 +51,51 @@ class InputFileInfo(BaseModel):
 
 
 class DataRecordMVP(BaseModel):
+    # Identificación
     callsign: str | None = None
     aircraft_id: str | None = None
+    target_address: str | None = None
+    mode3a: str | None = None
+    track_number: int | None = None
+
+    # Posición
     latitude: float
     longitude: float
-    altitude: float
+    altitude: float                       # corregida QNH si <6000 ft
+    altitude_qnh_ft: float | None = None
+    fl: float | None = None
+    x_m: float | None = None              # proyección estereográfica
+    y_m: float | None = None
     time: str
-    speed: float | None = None
+
+    # Velocidades
+    speed: float | None = None            # legado
+    ias: float | None = None
+    tas: float | None = None
+    ground_speed: float | None = None
+    mach: float | None = None
+
+    # Ángulos
+    heading: float | None = None
+    tta: float | None = None              # true track angle
+    roll_angle: float | None = None
+    tar: float | None = None              # track angle rate
+
+    # Verticales
+    bp: float | None = None               # baro pressure
+    ivv: float | None = None
+    baro_alt_rate: float | None = None
+
+    # Estado
+    stat: str | None = None
+
+    # Plan de vuelo (si mergeado)
+    sid: str | None = None
+    runway: str | None = None
+    aircraft_type: str | None = None
+    wake_category: str | None = None
+    atot: str | None = None
+    destination: str | None = None
 
 
 class DataResponseMVP(BaseModel):

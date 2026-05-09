@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+import numpy as np
 import pandas as pd
 
 from ...config import get_settings
@@ -11,6 +12,13 @@ from ...database import get_db
 from ...database import delete_upload, fetch_records, fetch_summary, fetch_upload, fetch_uploads
 from ...schemas import DatasetRecordOut, DatasetSummary, InputFileInfo, UploadListItem, UploadResponse, DataResponseMVP, DataRecordMVP
 from ...services.ingest import ingest_existing_file, ingest_upload
+from ...services import separations as separations_svc
+from ...services import turn_detection as turn_svc
+from ...services import nadp as nadp_svc
+from ...services import threshold_analysis as threshold_svc
+from ...services import stats as stats_svc
+from fastapi import Query
+from fastapi.responses import PlainTextResponse
 from ...data_processing.csv_loader import CSVLoader
 from ...data_processing.asterix_processor import AsterixProcessor
 from ...data_processing.flight_plan_loader import FlightPlanLoader
@@ -267,6 +275,180 @@ def mvp_get_processed(limit: int = 1000, offset: int = 0) -> DataResponseMVP:
     )
 
 
+@router.get("/mvp/separations", response_model=dict[str, object])
+def mvp_get_separations(format: str = "json") -> dict[str, object] | PlainTextResponse:
+    """Calcula separaciones radar/estela/LoA entre despegues consecutivos.
+
+    Query params:
+        format: "json" (default) o "csv"
+    """
+    df = get_processed_data()
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No processed data available. Upload a radar CSV first.")
+
+    try:
+        result_df = separations_svc.compute_separations(df)
+    except Exception as exc:
+        logger.exception("Separation computation failed")
+        raise HTTPException(status_code=500, detail=f"Separation computation error: {exc}")
+
+    if format.lower() == "csv":
+        csv_text = separations_svc.to_csv(result_df)
+        return PlainTextResponse(content=csv_text, media_type="text/csv")
+
+    if result_df.empty:
+        return {"total_pairs": 0, "rows": []}
+
+    rows = result_df.replace({np.nan: None}).to_dict(orient="records")
+    return {
+        "total_pairs": len(rows),
+        "metrics": {
+            "radar_twr_losses": int(result_df["radar_twr_loss"].fillna(False).sum()),
+            "wake_twr_losses": int(result_df["wake_twr_loss"].fillna(False).sum()),
+            "wake_tma_losses": int(result_df["wake_tma_loss"].fillna(False).sum()),
+            "loa_losses": int(result_df["loa_loss"].fillna(False).sum()),
+        },
+        "rows": rows,
+    }
+
+
+@router.get("/mvp/turns", response_model=dict[str, object])
+def mvp_get_turns(format: str = "json") -> dict[str, object] | PlainTextResponse:
+    """Detecta el inicio del viraje para despegues 24L.
+
+    Query params:
+        format: "json" (default) o "csv"
+    """
+    df = get_processed_data()
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No processed data available. Upload a radar CSV first.")
+
+    try:
+        result_df = turn_svc.compute_turns(df)
+    except Exception as exc:
+        logger.exception("Turn detection failed")
+        raise HTTPException(status_code=500, detail=f"Turn detection error: {exc}")
+
+    if format.lower() == "csv":
+        return PlainTextResponse(content=turn_svc.to_csv(result_df), media_type="text/csv")
+
+    if result_df.empty:
+        return {"total_departures": 0, "rows": []}
+
+    rows = result_df.replace({np.nan: None}).to_dict(orient="records")
+    detected = int(result_df["turn_start_time"].notna().sum())
+    crosses = int(result_df["crosses_r234"].fillna(False).sum())
+    return {
+        "total_departures": len(rows),
+        "metrics": {
+            "turns_detected": detected,
+            "crosses_r234": crosses,
+        },
+        "rows": rows,
+    }
+
+
+@router.get("/mvp/nadp", response_model=dict[str, object])
+def mvp_get_nadp(format: str = "json", threshold_kt: float = 30.0) -> dict[str, object] | PlainTextResponse:
+    """Clasifica cada despegue 24L como NADP1 (acelera tarde) o NADP2 (acelera pronto).
+
+    Query params:
+        format: "json" (default) o "csv"
+        threshold_kt: umbral ΔIAS para distinguir NADP1/NADP2 (default 30 kt)
+    """
+    df = get_processed_data()
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No processed data available. Upload a radar CSV first.")
+
+    try:
+        result_df = nadp_svc.compute_nadp(df, threshold_kt=threshold_kt)
+    except Exception as exc:
+        logger.exception("NADP classification failed")
+        raise HTTPException(status_code=500, detail=f"NADP classification error: {exc}")
+
+    if format.lower() == "csv":
+        return PlainTextResponse(content=nadp_svc.to_csv(result_df), media_type="text/csv")
+
+    if result_df.empty:
+        return {"total_departures": 0, "rows": []}
+
+    rows = result_df.replace({np.nan: None}).to_dict(orient="records")
+    nadp1 = int((result_df["nadp"] == "NADP1").sum())
+    nadp2 = int((result_df["nadp"] == "NADP2").sum())
+    return {
+        "total_departures": len(rows),
+        "threshold_kt": threshold_kt,
+        "metrics": {
+            "nadp1": nadp1,
+            "nadp2": nadp2,
+            "unclassified": len(rows) - nadp1 - nadp2,
+        },
+        "rows": rows,
+    }
+
+
+@router.get("/mvp/thresholds", response_model=dict[str, object])
+def mvp_get_thresholds(format: str = "json") -> dict[str, object] | PlainTextResponse:
+    """Análisis sobre cabeceras 24L/06R: IAS, alt y % giro antes del THR.
+
+    Query params:
+        format: "json" (default) o "csv"
+    """
+    df = get_processed_data()
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No processed data available. Upload a radar CSV first.")
+
+    try:
+        result_df = threshold_svc.compute_thresholds(df)
+    except Exception as exc:
+        logger.exception("Threshold analysis failed")
+        raise HTTPException(status_code=500, detail=f"Threshold analysis error: {exc}")
+
+    if format.lower() == "csv":
+        return PlainTextResponse(content=threshold_svc.to_csv(result_df), media_type="text/csv")
+
+    if result_df.empty:
+        return {"total": 0, "rows": [], "summary": {}}
+
+    rows = result_df.replace({np.nan: None}).to_dict(orient="records")
+    return {
+        "total": len(rows),
+        "summary": threshold_svc.summary_metrics(result_df),
+        "rows": rows,
+    }
+
+
+@router.get("/mvp/stats", response_model=dict[str, object])
+def mvp_get_stats(
+    dataset: str = Query("separations", description="Dataset: separations|turns|nadp|thresholds"),
+    metric: str | None = Query(None, description="Columna numérica a describir"),
+    groupby: str | None = Query(None, description="Columnas separadas por coma (sid,airline,aircraft_type,wake,runway,...)"),
+    violation_col: str | None = Query(None, description="Columna boolean para % incumplimientos"),
+) -> dict[str, object]:
+    """Estadísticas (media, σ, p95, min, max, % incumplimientos) sobre cualquiera
+    de los pipelines, agrupables por SID, aerolínea, tipo de aeronave, estela, etc.
+    """
+    df = get_processed_data()
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No processed data available. Upload a radar CSV first.")
+
+    gb = [c.strip() for c in groupby.split(",")] if groupby else None
+
+    try:
+        return stats_svc.compute_stats(
+            df,
+            dataset=dataset,
+            metric=metric,
+            groupby=gb,
+            violation_col=violation_col,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Stats computation failed")
+        raise HTTPException(status_code=500, detail=f"Stats error: {exc}")
+
+
 @router.get("/mvp/info", response_model=dict[str, object])
 def mvp_get_info() -> dict[str, object]:
     """Get info about current loaded data."""
@@ -295,52 +477,76 @@ def mvp_get_info() -> dict[str, object]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _pick_str(row: pd.Series, *cols: str) -> str | None:
+    for c in cols:
+        if c in row.index and pd.notna(row[c]):
+            return str(row[c])
+    return None
+
+
+def _pick_float(row: pd.Series, *cols: str) -> float | None:
+    for c in cols:
+        if c in row.index and pd.notna(row[c]):
+            try:
+                return float(row[c])
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _pick_int(row: pd.Series, *cols: str) -> int | None:
+    v = _pick_float(row, *cols)
+    return int(v) if v is not None else None
+
+
 def _df_to_mvp_records(slice_df: pd.DataFrame) -> list[DataRecordMVP]:
-    """Convert a DataFrame slice to a list of DataRecordMVP objects."""
-    records = []
+    """Volcado completo de un slice de DataFrame a DataRecordMVP."""
+    records: list[DataRecordMVP] = []
     for _, row in slice_df.iterrows():
-        # callsign
-        callsign = None
-        for col in ["callsign", "registration", "tn", "ti"]:
-            if col in row.index and pd.notna(row[col]):
-                callsign = str(row[col])
-                break
+        alt_val = _pick_float(row, "altitude_qnh_ft", "altitude", "h_ft") or 0.0
+        time_val = (
+            pd.Timestamp(row["time"]).isoformat()
+            if "time" in row.index and pd.notna(row.get("time"))
+            else ""
+        )
+        atot_val = (
+            pd.Timestamp(row["atot"]).isoformat()
+            if "atot" in row.index and pd.notna(row.get("atot"))
+            else _pick_str(row, "atot")
+        )
 
-        # aircraft_id
-        aircraft_id = None
-        for col in ["aircraft_id", "icao", "mode3/a"]:
-            if col in row.index and pd.notna(row[col]):
-                aircraft_id = str(row[col])
-                break
-
-        # speed
-        speed = None
-        for col in ["speed", "ias", "ground_speed", "gs(kt)", "tas"]:
-            if col in row.index and pd.notna(row[col]):
-                try:
-                    speed = float(row[col])
-                    break
-                except (ValueError, TypeError):
-                    pass
-
-        # altitude — prefer QNH-corrected value
-        alt_val = 0.0
-        for col in ["altitude_qnh_ft", "altitude"]:
-            if col in row.index and pd.notna(row[col]):
-                try:
-                    alt_val = float(row[col])
-                    break
-                except (ValueError, TypeError):
-                    pass
-
-        record = DataRecordMVP(
-            callsign=callsign,
-            aircraft_id=aircraft_id,
+        records.append(DataRecordMVP(
+            callsign=_pick_str(row, "callsign", "registration"),
+            aircraft_id=_pick_str(row, "aircraft_id", "icao", "registration"),
+            target_address=_pick_str(row, "target_address"),
+            mode3a=_pick_str(row, "mode3a"),
+            track_number=_pick_int(row, "track_number"),
             latitude=float(row["latitude"]),
             longitude=float(row["longitude"]),
             altitude=alt_val,
-            time=pd.Timestamp(row["time"]).isoformat() if pd.notna(row.get("time")) else "",
-            speed=speed,
-        )
-        records.append(record)
+            altitude_qnh_ft=_pick_float(row, "altitude_qnh_ft"),
+            fl=_pick_float(row, "fl"),
+            x_m=_pick_float(row, "x_m"),
+            y_m=_pick_float(row, "y_m"),
+            time=time_val,
+            speed=_pick_float(row, "speed", "ias", "ground_speed_kt", "tas"),
+            ias=_pick_float(row, "ias"),
+            tas=_pick_float(row, "tas"),
+            ground_speed=_pick_float(row, "ground_speed_kt", "ground_speed"),
+            mach=_pick_float(row, "mach"),
+            heading=_pick_float(row, "heading"),
+            tta=_pick_float(row, "tta"),
+            roll_angle=_pick_float(row, "roll_angle"),
+            tar=_pick_float(row, "tar"),
+            bp=_pick_float(row, "bp"),
+            ivv=_pick_float(row, "ivv"),
+            baro_alt_rate=_pick_float(row, "baro_alt_rate"),
+            stat=_pick_str(row, "stat"),
+            sid=_pick_str(row, "sid"),
+            runway=_pick_str(row, "runway_fp", "runway"),
+            aircraft_type=_pick_str(row, "aircraft_type"),
+            wake_category=_pick_str(row, "wake_cat"),
+            atot=atot_val,
+            destination=_pick_str(row, "destination"),
+        ))
     return records

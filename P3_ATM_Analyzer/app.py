@@ -48,5 +48,11 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def on_startup() -> None:
         init_db()
+        try:
+            from .services.bootstrap import bootstrap_inputs
+            bootstrap_inputs()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Bootstrap failed (non-fatal)")
 
     return app

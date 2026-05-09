@@ -32,6 +32,40 @@ WAKE_MAP: dict[str, str] = {
 }
 
 
+def _atot_to_timestamp(value) -> pd.Timestamp:
+    """Convierte un valor de ATOT (Timedelta, string HH:MM:SS, datetime) a un
+    Timestamp anclado en la fecha de hoy para que sea comparable con la columna
+    'time' del radar."""
+    if pd.isna(value):
+        return pd.NaT
+    today = pd.Timestamp.today().normalize()
+    if isinstance(value, pd.Timedelta):
+        return today + value
+    if isinstance(value, pd.Timestamp):
+        # Si trae fecha 1900 o similar, reanclar a hoy preservando hora
+        return today + pd.Timedelta(
+            hours=int(value.hour),
+            minutes=int(value.minute),
+            seconds=int(value.second),
+        )
+    s = str(value).strip()
+    try:
+        td = pd.to_timedelta(s)
+        if pd.notna(td):
+            return today + td
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(s, errors="coerce")
+        if pd.notna(ts):
+            return today + pd.Timedelta(
+                hours=int(ts.hour), minutes=int(ts.minute), seconds=int(ts.second)
+            )
+    except Exception:
+        pass
+    return pd.NaT
+
+
 class FlightPlanLoader:
     """Carga planes de vuelo desde CSV y permite merge con datos radar ASTERIX."""
 
@@ -39,32 +73,42 @@ class FlightPlanLoader:
         self.df: pd.DataFrame | None = None
 
     def load(self, file_path: str = None, file_content: bytes = None) -> pd.DataFrame:
-        """Carga un CSV de planes de vuelo y normaliza sus columnas.
+        """Carga un fichero (CSV o XLSX) de planes de vuelo y normaliza columnas.
 
         Args:
-            file_path: Ruta al fichero CSV.
-            file_content: Contenido binario del CSV (alternativa a file_path).
+            file_path: Ruta al fichero (csv|xlsx|xls).
+            file_content: Contenido binario (alternativa a file_path). Para xlsx
+                la detección se basa en la firma "PK" (zip).
 
         Returns:
             DataFrame con columnas canonicas.
         """
+        is_xlsx = False
         if file_path:
-            content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-        elif file_content:
-            content = file_content.decode("utf-8", errors="replace")
+            suffix = Path(file_path).suffix.lower()
+            is_xlsx = suffix in (".xlsx", ".xls")
+        elif file_content is not None:
+            is_xlsx = file_content[:2] == b"PK"
         else:
             raise ValueError("Proporcionar file_path o file_content")
 
-        # Detect delimiter: semicolon takes priority if more frequent
-        first_line = content.split("\n")[0]
-        delim = ";" if first_line.count(";") > first_line.count(",") else ","
+        if is_xlsx:
+            source = file_path if file_path else io.BytesIO(file_content)
+            df = pd.read_excel(source, sheet_name=0)
+        else:
+            if file_path:
+                content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+            else:
+                content = file_content.decode("utf-8", errors="replace")
+            first_line = content.split("\n")[0]
+            delim = ";" if first_line.count(";") > first_line.count(",") else ","
+            df = pd.read_csv(
+                io.StringIO(content),
+                sep=delim,
+                decimal=",",
+                skipinitialspace=True,
+            )
 
-        df = pd.read_csv(
-            io.StringIO(content),
-            sep=delim,
-            decimal=",",
-            skipinitialspace=True,
-        )
         df.columns = [c.strip().lower() for c in df.columns]
 
         # Map columns to canonical names
@@ -96,6 +140,11 @@ class FlightPlanLoader:
         # Normalize callsign (strip whitespace, uppercase)
         if "callsign" in df.columns:
             df["callsign"] = df["callsign"].astype(str).str.strip().str.upper()
+
+        # Normalize ATOT to a Timestamp anchored on today's date so it is
+        # comparable to the radar 'time' column (which uses today as base).
+        if "atot" in df.columns:
+            df["atot"] = df["atot"].apply(_atot_to_timestamp)
 
         self.df = df
         return df

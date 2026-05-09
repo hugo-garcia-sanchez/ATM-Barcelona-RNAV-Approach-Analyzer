@@ -1,5 +1,39 @@
+# Entornos virtuales
 .venv/
+venv/
+env/
+ENV/
+
+# Python cache
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs y temporales
+*.log
+*.tmp
+*.temp
+.DS_Store
+
+# IDEs y herramientas de agentes
+.claude/
+.cursor/
+.vscode/
+.idea/
+.planning/
 agents/
+
+# Base de datos (datos generados por la app)
+*.db
+*.sqlite3
+
+# Entorno
+.env
+
+# Archivos de sistema
+Thumbs.db
+desktop.ini

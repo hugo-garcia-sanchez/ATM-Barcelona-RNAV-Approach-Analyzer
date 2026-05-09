@@ -12,23 +12,29 @@ import pandas as pd
 # Value = list of possible CSV column name variants (lowercase, stripped)
 # ---------------------------------------------------------------------------
 ASTERIX_COLUMN_PATTERNS: dict[str, list[str]] = {
-    "fl":            ["fl", "i090_fl", "flight_level", "i090"],
-    "tod":           ["tod", "i140_tod", "time_of_day"],
-    "track_number":  ["track", "i161", "track_number", "track_num"],
-    "stat":          ["stat", "i230_stat", "flight_status", "status"],
-    "callsign":      ["callsign", "tid", "i240_tid", "indicativo"],
-    "bp":            ["bp", "i250_bp", "baro_pressure", "barometric_pressure"],
-    "roll_angle":    ["roll_angle", "ra", "i250_ra", "roll"],
-    "tta":           ["tta", "true_track_angle", "true_track"],
-    "ground_speed":  ["gs", "ground_speed", "i250_gs"],
-    "tar":           ["tar", "track_angle_rate"],
-    "tas":           ["tas", "true_airspeed"],
-    "mh":            ["mh", "magnetic_heading"],
-    "ias":           ["ias", "indicated_airspeed", "indicated_air_speed"],
-    "baro_alt_rate": ["bar", "baro_alt_rate", "barometric_alt_rate"],
-    "ivv":           ["ivv", "inertial_vertical_velocity"],
-    "rho":           ["rho", "i040_rho"],
-    "theta":         ["theta", "i040_theta"],
+    "fl":             ["fl", "i090_fl", "flight_level", "i090"],
+    "tod":            ["tod", "i140_tod", "time_of_day"],
+    "track_number":   ["tn", "track", "i161", "track_number", "track_num"],
+    "stat":           ["stat", "i230_stat", "flight_status", "status"],
+    "callsign":       ["callsign", "ti", "tid", "i240_tid", "indicativo"],
+    "target_address": ["ta", "target_address", "icao24"],
+    "mode3a":         ["mode3/a", "mode3a", "mode_3a", "m3a"],
+    "bp":             ["bp", "i250_bp", "baro_pressure", "barometric_pressure"],
+    "roll_angle":     ["ra", "roll_angle", "i250_ra", "roll"],
+    "tta":            ["tta", "true_track_angle", "true_track"],
+    "ground_speed":   ["gs", "ground_speed", "i250_gs"],
+    "ground_speed_kt":["gs(kt)", "gs_kt", "ground_speed_kt"],
+    "tar":            ["tar", "track_angle_rate"],
+    "tas":            ["tas", "true_airspeed"],
+    "heading":        ["hdg", "mh", "magnetic_heading", "heading"],
+    "ias":            ["ias", "indicated_airspeed", "indicated_air_speed"],
+    "mach":           ["mach"],
+    "baro_alt_rate":  ["bar", "baro_alt_rate", "barometric_alt_rate"],
+    "ivv":            ["ivv", "inertial_vertical_velocity"],
+    "rho":            ["rho", "i040_rho"],
+    "theta":          ["theta", "i040_theta"],
+    "h_ft":           ["h(ft)", "h_ft"],
+    "h_m":            ["h(m)", "h_m"],
 }
 
 
@@ -197,15 +203,26 @@ class CSVLoader:
         
         df = df.rename(columns=rename_map)
 
-        # Ensure numeric types for coordinates and altitude
-        try:
-            df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-            df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-            df["altitude"] = pd.to_numeric(df["altitude"], errors="coerce")
-            if "speed" in df.columns:
-                df["speed"] = pd.to_numeric(df["speed"], errors="coerce")
-        except Exception as e:
-            raise ValueError(f"Failed to convert numeric columns: {str(e)}")
+        # Coerce numeric columns. Mixed values like "N/A" force string dtype,
+        # so decimal="," from read_csv is bypassed. We re-coerce manually.
+        numeric_cols = [
+            "latitude", "longitude", "altitude",
+            "speed", "fl", "bp", "roll_angle", "tta", "ground_speed",
+            "ground_speed_kt", "tar", "tas", "heading", "ias", "mach",
+            "baro_alt_rate", "ivv", "rho", "theta", "h_ft", "h_m",
+            "track_number",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                s = df[col]
+                if s.dtype == object or pd.api.types.is_string_dtype(s):
+                    s = (
+                        s.astype(str)
+                        .str.replace(",", ".", regex=False)
+                        .str.strip()
+                        .replace({"N/A": None, "n/a": None, "": None, "nan": None})
+                    )
+                df[col] = pd.to_numeric(s, errors="coerce")
 
         # Parse time column to datetime
         try:

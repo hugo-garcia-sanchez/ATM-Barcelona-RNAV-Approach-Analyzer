@@ -18,6 +18,10 @@ const state = {
   filters: {
     minAlt: null,
     maxAlt: null,
+    minSpeed: null,
+    maxSpeed: null,
+    timeFrom: "",
+    timeTo: "",
     callsign: "",
   },
   map: null,
@@ -38,8 +42,14 @@ const elements = {
   datasetInfo: document.getElementById("datasetInfo"),
   minAlt: document.getElementById("minAlt"),
   maxAlt: document.getElementById("maxAlt"),
+  minSpeed: document.getElementById("minSpeed"),
+  maxSpeed: document.getElementById("maxSpeed"),
+  timeFrom: document.getElementById("timeFrom"),
+  timeTo: document.getElementById("timeTo"),
   callsignFilter: document.getElementById("callsignFilter"),
   filterBtn: document.getElementById("filterBtn"),
+  clearFiltersBtn: document.getElementById("clearFiltersBtn"),
+  filterPreviewCount: document.getElementById("filterPreviewCount"),
   recordCount: document.getElementById("recordCount"),
   tableBody: document.getElementById("tableBody"),
   pageInfo: document.getElementById("pageInfo"),
@@ -161,6 +171,8 @@ function clearData() {
   // FIX 5: Reset file input so "Choose File" works again
   elements.fileInput.value = "";
 
+  if (elements.filterPreviewCount) elements.filterPreviewCount.textContent = "—";
+
   setStatus("Data cleared", false);
 
   // Clear map
@@ -184,6 +196,7 @@ async function loadTableData() {
 
     applyFilters();
     renderTablePage();
+    updateFilterPreview();
     setStatus("Data loaded", false);
   } catch (error) {
     setStatus(`Error loading data: ${error.message}`, false);
@@ -207,38 +220,108 @@ function updateDatasetInfo(info) {
 
 function setupFilterHandlers() {
   elements.filterBtn.addEventListener("click", applyFilters);
+  elements.clearFiltersBtn.addEventListener("click", clearFilters);
 
-  [elements.minAlt, elements.maxAlt, elements.callsignFilter].forEach((input) => {
+  const inputs = [
+    elements.minAlt, elements.maxAlt,
+    elements.minSpeed, elements.maxSpeed,
+    elements.timeFrom, elements.timeTo,
+    elements.callsignFilter,
+  ];
+  inputs.forEach((input) => {
     input.addEventListener("keypress", (e) => {
       if (e.key === "Enter") applyFilters();
     });
+    input.addEventListener("input", updateFilterPreview);
+    input.addEventListener("change", updateFilterPreview);
   });
 }
 
+function readFilterInputs() {
+  return {
+    minAlt: elements.minAlt.value ? parseFloat(elements.minAlt.value) : null,
+    maxAlt: elements.maxAlt.value ? parseFloat(elements.maxAlt.value) : null,
+    minSpeed: elements.minSpeed.value ? parseFloat(elements.minSpeed.value) : null,
+    maxSpeed: elements.maxSpeed.value ? parseFloat(elements.maxSpeed.value) : null,
+    timeFrom: elements.timeFrom.value || "",
+    timeTo: elements.timeTo.value || "",
+    callsign: elements.callsignFilter.value.toUpperCase(),
+  };
+}
+
+function timeToMinutes(hhmm) {
+  if (!hhmm) return null;
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function recordTimeMinutes(record) {
+  const t = record.time;
+  if (!t) return null;
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return null;
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+function matchesFilters(record, f) {
+  if (f.minAlt !== null && record.altitude < f.minAlt) return false;
+  if (f.maxAlt !== null && record.altitude > f.maxAlt) return false;
+  if (f.minSpeed !== null && (record.speed == null || record.speed < f.minSpeed)) return false;
+  if (f.maxSpeed !== null && (record.speed == null || record.speed > f.maxSpeed)) return false;
+
+  const fromMin = timeToMinutes(f.timeFrom);
+  const toMin = timeToMinutes(f.timeTo);
+  if (fromMin !== null || toMin !== null) {
+    const recMin = recordTimeMinutes(record);
+    if (recMin === null) return false;
+    if (fromMin !== null && toMin !== null) {
+      if (fromMin <= toMin) {
+        if (recMin < fromMin || recMin > toMin) return false;
+      } else {
+        // Wrap past midnight
+        if (recMin < fromMin && recMin > toMin) return false;
+      }
+    } else if (fromMin !== null && recMin < fromMin) return false;
+    else if (toMin !== null && recMin > toMin) return false;
+  }
+
+  if (f.callsign && !(record.callsign || "").toUpperCase().includes(f.callsign)) return false;
+  return true;
+}
+
+function updateFilterPreview() {
+  if (!state.allRecords.length) {
+    elements.filterPreviewCount.textContent = "—";
+    return;
+  }
+  const f = readFilterInputs();
+  let count = 0;
+  for (const r of state.allRecords) if (matchesFilters(r, f)) count++;
+  elements.filterPreviewCount.textContent = `${count.toLocaleString()} / ${state.allRecords.length.toLocaleString()}`;
+}
+
 function applyFilters() {
-  const minAlt = elements.minAlt.value ? parseFloat(elements.minAlt.value) : null;
-  const maxAlt = elements.maxAlt.value ? parseFloat(elements.maxAlt.value) : null;
-  const callsign = elements.callsignFilter.value.toUpperCase();
-
-  // FIX 4: Debug logging for filters
-  console.log("Filters applied:", { minAlt, maxAlt, callsign, totalRecords: state.allRecords.length });
-
-  state.filters = { minAlt, maxAlt, callsign };
-
-  state.displayRecords = state.allRecords.filter((record) => {
-    if (minAlt !== null && record.altitude < minAlt) return false;
-    if (maxAlt !== null && record.altitude > maxAlt) return false;
-    if (callsign && !record.callsign?.toUpperCase().includes(callsign)) return false;
-    return true;
-  });
-
-  console.log("After filter:", state.displayRecords.length, "records");
+  const f = readFilterInputs();
+  state.filters = f;
+  state.displayRecords = state.allRecords.filter((r) => matchesFilters(r, f));
 
   state.currentPage = 0;
   renderTablePage();
   updateMapMarkers();
+  updateFilterPreview();
 
   setStatus(`Filtered: ${state.displayRecords.length} records`, false);
+}
+
+function clearFilters() {
+  elements.minAlt.value = "";
+  elements.maxAlt.value = "";
+  elements.minSpeed.value = "";
+  elements.maxSpeed.value = "";
+  elements.timeFrom.value = "";
+  elements.timeTo.value = "";
+  elements.callsignFilter.value = "";
+  applyFilters();
 }
 
 // ============================================
@@ -292,7 +375,10 @@ function renderTablePage() {
   elements.prevPageBtn.disabled = state.currentPage === 0;
   elements.nextPageBtn.disabled = state.currentPage >= totalPages - 1;
 
-  elements.recordCount.textContent = `${state.displayRecords.length} records`;
+  const totalRecords = state.displayRecords.length;
+  const rangeStart = totalRecords > 0 ? start + 1 : 0;
+  const rangeEnd = Math.min(end, totalRecords);
+  elements.recordCount.textContent = `Viewing ${rangeStart}-${rangeEnd} of ${totalRecords.toLocaleString()} records`;
 }
 
 function setupPaginationHandlers() {
@@ -419,31 +505,32 @@ function setupExportHandlers() {
   elements.exportBtn.addEventListener("click", exportToCSV);
 }
 
+function escapeCSV(value) {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  if (/[",\n\r]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+  return str;
+}
+
 function exportToCSV() {
   if (state.displayRecords.length === 0) {
     alert("No data to export");
     return;
   }
 
-  const headers = ["Callsign", "Latitude", "Longitude", "Altitude (ft)", "Time", "Speed (kts)"];
-  const rows = state.displayRecords.map((r) => [
-    r.callsign || "",
-    r.latitude,
-    r.longitude,
-    r.altitude,
-    r.time,
-    r.speed || "",
-  ]);
+  // Export ALL columns of the filtered records (dynamic schema)
+  const headers = Object.keys(state.displayRecords[0]);
+  const rows = state.displayRecords.map((r) => headers.map((h) => escapeCSV(r[h])));
 
-  const csv = [headers, ...rows].map((row) => row.map((cell) => `"${cell}"`).join(",")).join("\n");
+  const csv = [headers.map(escapeCSV).join(","), ...rows.map((row) => row.join(","))].join("\n");
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `atm_data_${new Date().getTime()}.csv`;
+  link.download = `atm_filtered_${state.displayRecords.length}rows_${new Date().getTime()}.csv`;
   link.click();
 
-  setStatus("Data exported", false);
+  setStatus(`Exported ${state.displayRecords.length} filtered records`, false);
 }
 
 // ============================================
