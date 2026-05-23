@@ -91,15 +91,28 @@ class SeparationResult:
     runway: str
     atot_leader: str | None
     atot_follower: str | None
+    leader_sid: str | None
+    follower_sid: str | None
+    leader_sid_family: str | None
+    follower_sid_family: str | None
+    leader_aircraft_type: str | None
+    follower_aircraft_type: str | None
     leader_wake: str | None
     follower_wake: str | None
     leader_class: str | None
     follower_class: str | None
     same_sid_family: bool | None
+    radar_twr_time: str | None = None
+    radar_tma_min_time: str | None = None
+    twr_computable: bool = False
+    tma_computable: bool = False
+    computation_note: str | None = None
     radar_twr_nm: float | None = None
     radar_twr_dalt_ft: float | None = None
     radar_twr_loss: bool | None = None
     radar_tma_min_nm: float | None = None
+    radar_tma_dalt_ft: float | None = None
+    radar_tma_loss: bool | None = None
     wake_twr_required_nm: float | None = None
     wake_twr_required_s: float | None = None
     wake_twr_actual_nm: float | None = None
@@ -222,29 +235,29 @@ def _track_distance_at_time(track: pd.DataFrame, ts: pd.Timestamp) -> tuple[floa
     return float(row["latitude"]), float(row["longitude"]), float(row.get(alt_col, 0.0))
 
 
-def _min_separation_overlap(leader: Departure, follower: Departure) -> tuple[float | None, float | None]:
+def _min_separation_overlap(leader: Departure, follower: Departure) -> tuple[float | None, float | None, str | None]:
     """Mínima separación radar y mínima Δalt en el solapamiento TMA.
 
     Returns:
-        (min_nm, min_dalt_ft) durante el tramo en que ambos están en el filtro.
+        (min_nm, min_dalt_ft, min_time) durante el tramo en que ambos están en el filtro.
     """
     a = leader.track
     b = follower.track
     if a.empty or b.empty:
-        return None, None
+        return None, None, None
 
     # Solapamiento temporal
     t0 = max(a["time"].iloc[0], b["time"].iloc[0])
     t1 = min(a["time"].iloc[-1], b["time"].iloc[-1])
     if t0 >= t1:
-        return None, None
+        return None, None, None
 
     # Filtra ambas series al solapamiento e índiceá por tiempo
     a_ov = a[(a["time"] >= t0) & (a["time"] <= t1)].set_index("time")
     b_ov = b[(b["time"] >= t0) & (b["time"] <= t1)].set_index("time")
     common = a_ov.index.intersection(b_ov.index)
     if len(common) == 0:
-        return None, None
+        return None, None, None
 
     a_ov = a_ov.loc[common]
     b_ov = b_ov.loc[common]
@@ -266,53 +279,47 @@ def _min_separation_overlap(leader: Departure, follower: Departure) -> tuple[flo
     alt_col = "altitude_qnh_ft" if "altitude_qnh_ft" in a_ov.columns else "altitude"
     dalt = np.abs(a_ov[alt_col].to_numpy() - b_ov[alt_col].to_numpy())
 
-    return float(np.nanmin(d_nm)), float(dalt[np.nanargmin(d_nm)])
+    min_idx = int(np.nanargmin(d_nm))
+    min_time = pd.Timestamp(common[min_idx]).isoformat()
+    return float(np.nanmin(d_nm)), float(dalt[min_idx]), min_time
 
 
-def _radar_twr_at_first_sample(leader: Departure, follower: Departure) -> tuple[float | None, float | None]:
+def _radar_twr_at_first_sample(leader: Departure, follower: Departure) -> tuple[float | None, float | None, str | None]:
     """Una sola muestra: en el primer fix tras el despegue del follower, distancia
     al precedente y Δalt."""
     if follower.start_idx is None or follower.track.empty:
-        return None, None
+        return None, None, None
     fol_row = follower.track.iloc[follower.start_idx]
     ts = fol_row["time"]
     lead_pos = _track_distance_at_time(leader.track, ts)
     if lead_pos is None:
-        return None, None
+        return None, None, None
     d_nm = haversine_nm(
         float(fol_row["latitude"]), float(fol_row["longitude"]),
         lead_pos[0], lead_pos[1],
     )
     alt_col = "altitude_qnh_ft" if "altitude_qnh_ft" in follower.track.columns else "altitude"
     dalt = abs(float(fol_row.get(alt_col, 0.0)) - lead_pos[2])
-    return d_nm, dalt
+    return d_nm, dalt, pd.Timestamp(ts).isoformat()
 
 
-def _wake_twr_actual(leader: Departure, follower: Departure) -> tuple[float | None, float | None]:
-    """Distancia y diferencia temporal entre los pasos por THR."""
-    thr = _runway_thr(leader.runway)
-    if thr is None:
-        return None, None
-
-    def thr_crossing(track: pd.DataFrame) -> pd.Series | None:
-        if track.empty:
-            return None
-        lats = track["latitude"].astype(float).to_numpy()
-        lons = track["longitude"].astype(float).to_numpy()
-        dists = np.array([haversine_nm(la, lo, thr[0], thr[1]) for la, lo in zip(lats, lons)])
-        idx = int(np.argmin(dists))
-        return track.iloc[idx]
-
-    a_thr = thr_crossing(leader.track)
-    b_thr = thr_crossing(follower.track)
-    if a_thr is None or b_thr is None:
-        return None, None
-    d_nm = haversine_nm(
-        float(a_thr["latitude"]), float(a_thr["longitude"]),
-        float(b_thr["latitude"]), float(b_thr["longitude"]),
-    )
-    dt_s = abs((b_thr["time"] - a_thr["time"]).total_seconds())
-    return d_nm, dt_s
+def _time_gap_first_detection_s(leader: Departure, follower: Departure) -> float | None:
+    """Tiempo (segundos) entre la primera detección radar (≥0.5 NM del THR
+    alejándose) del leader y la del follower. Esta es la "separación temporal"
+    aplicable a la regla de estela TWR (PDF pág. 22) — corresponde a la
+    diferencia de pasos por el mismo punto de referencia."""
+    if leader.start_idx is None or follower.start_idx is None:
+        return None
+    if leader.track.empty or follower.track.empty:
+        return None
+    try:
+        t_lead = pd.Timestamp(leader.track.iloc[leader.start_idx]["time"])
+        t_foll = pd.Timestamp(follower.track.iloc[follower.start_idx]["time"])
+    except Exception:
+        return None
+    if pd.isna(t_lead) or pd.isna(t_foll):
+        return None
+    return abs((t_foll - t_lead).total_seconds())
 
 
 # ---------------------------------------------------------------------------
@@ -346,43 +353,78 @@ def compute_separations(processed_df: pd.DataFrame) -> pd.DataFrame:
                 rt.same_sid_family(leader.sid, follower.sid, rwy)
                 if leader.sid and follower.sid else None
             )
+            leader_sid_family = rt.get_sid_family(leader.sid, rwy) if leader.sid else None
+            follower_sid_family = rt.get_sid_family(follower.sid, rwy) if follower.sid else None
             l_class = rt.classify_aircraft(leader.aircraft_type)
             f_class = rt.classify_aircraft(follower.aircraft_type)
 
-            # Radar TWR (1 muestra)
-            r_nm, r_dalt = _radar_twr_at_first_sample(leader, follower)
+            # Radar TWR (1 muestra: primera detección del follower a ≥0.5 NM
+            # del THR alejándose).
+            r_nm, r_dalt, r_twr_time = _radar_twr_at_first_sample(leader, follower)
             r_loss = (
                 (r_nm is not None and r_dalt is not None
                  and r_nm < rt.RADAR_MIN_NM and r_dalt < rt.RADAR_MIN_VERT_FT)
             )
 
-            # Radar TMA (mínimo en solapamiento)
-            r_tma_min, _ = _min_separation_overlap(leader, follower)
+            # Radar TMA (distancia mínima durante el solapamiento + Δalt
+            # en ese instante)
+            r_tma_min, r_tma_dalt, r_tma_time = _min_separation_overlap(leader, follower)
+            r_tma_loss = (
+                r_tma_min is not None and r_tma_dalt is not None
+                and r_tma_min < rt.RADAR_MIN_NM and r_tma_dalt < rt.RADAR_MIN_VERT_FT
+            )
+            notes: list[str] = []
+            if r_nm is None:
+                notes.append("TWR no computable: precedente sin posicion en la primera deteccion del siguiente")
+            if r_tma_min is None:
+                notes.append("TMA no computable: sin solape temporal dentro del filtro")
 
-            # Estela
+            # Estela TWR (distancia y tiempo en primera detección; pág. 22 PDF)
+            # Distancia "actual" = la misma de la primera detección radar TWR
+            # (PDF pág. 19: "Incumplimiento de TWR sólo aplica a la primera
+            # detección radar del que despega respecto al precedente").
+            # Tiempo "actual" = gap entre primeras detecciones de leader y
+            # follower (paso por el mismo punto de referencia).
             wake_req = rt.get_wake_separation(leader.wake, follower.wake, "TWR")
             wake_tma_req = rt.get_wake_separation(leader.wake, follower.wake, "TMA")
-            wake_act_nm, wake_act_s = _wake_twr_actual(leader, follower)
+            wake_act_nm = r_nm
+            wake_act_s = _time_gap_first_detection_s(leader, follower)
 
             wake_twr_loss = None
             wake_tma_loss = None
-            req_nm_twr = req_s_twr = None
+            req_nm_twr: float | None = None
+            req_s_twr: float | None = None
             if wake_req is not None and wake_act_nm is not None:
                 req_nm_twr, req_s_twr = wake_req
-                wake_twr_loss = (wake_act_nm < req_nm_twr) or (
-                    wake_act_s is not None and wake_act_s < req_s_twr
+                # PDF pág. 24: pérdida operativa por estela requiere
+                # incumplimiento horizontal (distancia O tiempo) Y a la vez
+                # |Δalt| < 1000 ft.
+                horizontal_bust = wake_act_nm < req_nm_twr
+                if req_s_twr is not None and wake_act_s is not None:
+                    horizontal_bust = horizontal_bust or (wake_act_s < req_s_twr)
+                alt_bust = (
+                    r_dalt is not None and r_dalt < rt.RADAR_MIN_VERT_FT
                 )
+                wake_twr_loss = bool(horizontal_bust and alt_bust)
             if wake_tma_req is not None and r_tma_min is not None:
-                wake_tma_loss = r_tma_min < wake_tma_req
+                # PDF pág. 24 aplica también a TMA: pérdida operativa requiere
+                # |Δalt| < 1000 ft en el momento del mínimo.
+                horizontal_bust_tma = r_tma_min < wake_tma_req
+                alt_bust_tma = (
+                    r_tma_dalt is not None and r_tma_dalt < rt.RADAR_MIN_VERT_FT
+                )
+                wake_tma_loss = bool(horizontal_bust_tma and alt_bust_tma)
 
-            # LoA
+            # LoA (sólo TWR, pág. 25 PDF). Distancia "actual" es la misma
+            # primera detección radar.
             loa_req = (
                 rt.get_loa_separation(l_class, f_class, same_fam)
                 if same_fam is not None else None
             )
+            loa_actual = r_nm
             loa_loss = (
-                wake_act_nm is not None and loa_req is not None
-                and wake_act_nm < loa_req
+                loa_actual is not None and loa_req is not None
+                and loa_actual < loa_req
             )
 
             results.append(SeparationResult(
@@ -391,15 +433,28 @@ def compute_separations(processed_df: pd.DataFrame) -> pd.DataFrame:
                 runway=rwy,
                 atot_leader=leader.atot.isoformat() if leader.atot is not None else None,
                 atot_follower=follower.atot.isoformat() if follower.atot is not None else None,
+                leader_sid=leader.sid,
+                follower_sid=follower.sid,
+                leader_sid_family=leader_sid_family,
+                follower_sid_family=follower_sid_family,
+                leader_aircraft_type=leader.aircraft_type,
+                follower_aircraft_type=follower.aircraft_type,
                 leader_wake=leader.wake,
                 follower_wake=follower.wake,
                 leader_class=l_class,
                 follower_class=f_class,
                 same_sid_family=same_fam,
+                radar_twr_time=r_twr_time,
+                radar_tma_min_time=r_tma_time,
+                twr_computable=r_nm is not None,
+                tma_computable=r_tma_min is not None,
+                computation_note="; ".join(notes) if notes else None,
                 radar_twr_nm=r_nm,
                 radar_twr_dalt_ft=r_dalt,
                 radar_twr_loss=r_loss,
                 radar_tma_min_nm=r_tma_min,
+                radar_tma_dalt_ft=r_tma_dalt,
+                radar_tma_loss=bool(r_tma_loss) if r_tma_min is not None else None,
                 wake_twr_required_nm=req_nm_twr,
                 wake_twr_required_s=req_s_twr,
                 wake_twr_actual_nm=wake_act_nm,
@@ -409,7 +464,7 @@ def compute_separations(processed_df: pd.DataFrame) -> pd.DataFrame:
                 wake_tma_actual_nm=r_tma_min,
                 wake_tma_loss=wake_tma_loss,
                 loa_required_nm=loa_req,
-                loa_actual_nm=wake_act_nm,
+                loa_actual_nm=loa_actual,
                 loa_loss=loa_loss,
             ))
 

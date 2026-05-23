@@ -35,7 +35,11 @@ DATASETS = {
 
 # Sugerencia de columnas-flag de incumplimiento por dataset
 DEFAULT_VIOLATION_COLS: dict[str, list[str]] = {
-    "separations": ["radar_twr_loss", "wake_twr_loss", "wake_tma_loss", "loa_loss"],
+    "separations": [
+        "radar_twr_loss", "radar_tma_loss",
+        "wake_twr_loss", "wake_tma_loss",
+        "loa_loss",
+    ],
     "turns": [],
     "nadp": [],
     "thresholds": ["turned_before_thr"],
@@ -76,11 +80,23 @@ def describe(
     def _row(label_dict: dict[str, object], s: pd.Series) -> dict[str, object]:
         s = s.dropna()
         if s.empty:
-            return {**label_dict, "count": 0, "mean": None, "std": None, "p95": None, "min": None, "max": None}
+            return {
+                **label_dict,
+                "count": 0,
+                "mean": None,
+                "median": None,
+                "variance": None,
+                "std": None,
+                "p95": None,
+                "min": None,
+                "max": None,
+            }
         return {
             **label_dict,
             "count": int(s.size),
             "mean": float(s.mean()),
+            "median": float(s.median()),
+            "variance": float(s.var(ddof=0)) if s.size > 1 else 0.0,
             "std": float(s.std(ddof=0)) if s.size > 1 else 0.0,
             "p95": float(np.percentile(s, 95)),
             "min": float(s.min()),

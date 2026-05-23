@@ -58,9 +58,24 @@ def bootstrap_inputs() -> dict[str, object]:
     if fp_path is not None:
         try:
             fp_df = fp_loader.load(file_path=str(fp_path))
-            set_flight_plan(fp_df, filename=fp_path.name)
-            summary["flight_plan"] = {"file": fp_path.name, "rows": len(fp_df)}
-            logger.info("Flight plan loaded: %s (%d rows)", fp_path.name, len(fp_df))
+            # PDF P3 pág. 40: cuando ProcDesp viene vacío, buscar la SID en
+            # el campo Ruta. Las tablas SID_FAMILIES_* ya están cargadas en
+            # el paso 1 (apply_reference_files).
+            filled = 0
+            try:
+                filled = fp_loader.infer_missing_sids()
+            except Exception as exc:
+                logger.warning("Failed to infer missing SIDs: %s", exc)
+            set_flight_plan(fp_loader.df, filename=fp_path.name)
+            summary["flight_plan"] = {
+                "file": fp_path.name,
+                "rows": len(fp_loader.df),
+                "sids_inferred_from_route": filled,
+            }
+            logger.info(
+                "Flight plan loaded: %s (%d rows, %d SIDs inferred)",
+                fp_path.name, len(fp_loader.df), filled,
+            )
         except Exception as exc:
             logger.warning("Bootstrap flight plan failed: %s", exc)
             summary["flight_plan_error"] = str(exc)

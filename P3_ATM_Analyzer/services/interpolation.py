@@ -64,12 +64,17 @@ def interpolate_track(
 
     t = t.drop_duplicates(subset="time", keep="first").set_index("time")
 
-    # Rango temporal a 1 Hz
-    new_index = pd.date_range(
-        start=t.index[0],
-        end=t.index[-1],
-        freq=f"{freq_seconds}s",
-    )
+    # Rango temporal a 1 Hz, ANCLADO A SEGUNDOS ENTEROS para que dos trazas
+    # distintas tengan los mismos timestamps en su solape (de lo contrario
+    # `index.intersection` entre dos `Departure.track` queda vacía y los
+    # cálculos TMA fallan).
+    freq_str = f"{freq_seconds}s"
+    start = t.index[0].ceil(freq_str)
+    end = t.index[-1].floor(freq_str)
+    if end < start:
+        # Track demasiado corto para alinear a la rejilla → devolverlo tal cual.
+        return t.reset_index()
+    new_index = pd.date_range(start=start, end=end, freq=freq_str)
     if len(new_index) == 0:
         return t.reset_index()
 

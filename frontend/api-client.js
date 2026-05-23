@@ -67,6 +67,7 @@ class APIClient {
     return this._getJSON("/datasets/mvp/nadp", { threshold_kt: thresholdKt });
   }
   getThresholds() { return this._getJSON("/datasets/mvp/thresholds"); }
+  getCombinedResults() { return this._getJSON("/datasets/mvp/combined-results"); }
   getStats(opts = {}) {
     const params = {};
     if (opts.dataset) params.dataset = opts.dataset;

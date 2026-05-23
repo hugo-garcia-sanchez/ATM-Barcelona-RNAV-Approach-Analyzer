@@ -291,6 +291,8 @@
 
     const a = $("csvThresholds");
     if (a) a.href = api.csvURL("thresholds");
+    const combined = $("csvCombined");
+    if (combined) combined.href = api.csvURL("combined-results");
   }
 
   // ------------------------------------------------------------------

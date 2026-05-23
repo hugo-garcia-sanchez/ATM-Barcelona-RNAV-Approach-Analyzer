@@ -26,6 +26,9 @@ WAKE_ALIASES: Dict[str, str] = {
     "SUPER": "J",
     "S": "J",
     "SUPERPESADA": "J",
+    "SUPER PESADA": "J",
+    "SUPER_PESADA": "J",
+    "SUPER-PESADA": "J",
     "HEAVY": "H",
     "PESADA": "H",
     "MEDIUM": "M",
@@ -42,59 +45,52 @@ def normalize_wake(code: str | None) -> str | None:
     c = str(code).strip().upper()
     if c in WAKE_CATEGORIES:
         return c
-    return WAKE_ALIASES.get(c)
+    if c in WAKE_ALIASES:
+        return WAKE_ALIASES[c]
+    # Tolerar variaciones de espaciado/guion: "SUPER  PESADA", "SUPER-PESADA", etc.
+    c_norm = " ".join(c.replace("-", " ").replace("_", " ").split())
+    if c_norm in WAKE_ALIASES:
+        return WAKE_ALIASES[c_norm]
+    return None
 
 
 # ---------------------------------------------------------------------------
-# WAKE_TWR — Separación por estela en TWR (despegue): (NM, segundos)
-# Clave: (precedente, siguiente)
-# Fuente: PDF P3 pág. 22–23 / ICAO Doc 4444
+# WAKE_TWR — Separación por estela en TWR (despegue): (NM, segundos | None)
+# Clave: (precedente, siguiente). Sólo las combinaciones listadas en el PDF
+# pág. 22 aplican; el resto se devuelve como `None` (no aplica separación de
+# estela). El componente temporal es None para combinaciones donde la tabla
+# del PDF sólo proporciona distancia.
+# Fuente: PDF P3 pág. 22.
 # ---------------------------------------------------------------------------
-WAKE_TWR: Dict[Tuple[str, str], Tuple[float, int]] = {
-    # Super delante
-    ("J", "J"): (4.0, 120),
-    ("J", "H"): (6.0, 120),
-    ("J", "M"): (7.0, 180),
-    ("J", "L"): (8.0, 180),
-    # Heavy delante
-    ("H", "J"): (0.0, 60),
-    ("H", "H"): (4.0, 120),
-    ("H", "M"): (5.0, 120),
-    ("H", "L"): (6.0, 180),
-    # Medium delante
-    ("M", "J"): (0.0, 60),
-    ("M", "H"): (0.0, 60),
-    ("M", "M"): (3.0, 60),
-    ("M", "L"): (5.0, 180),
-    # Light delante
-    ("L", "J"): (0.0, 60),
-    ("L", "H"): (0.0, 60),
-    ("L", "M"): (0.0, 60),
-    ("L", "L"): (3.0, 60),
+WAKE_TWR: Dict[Tuple[str, str], Tuple[float, int | None]] = {
+    # Super Pesada (J) delante
+    ("J", "H"): (6.0, 120),    # 6 NM (2 min)
+    ("J", "M"): (7.0, 180),    # 7 NM (3 min)
+    ("J", "L"): (8.0, 180),    # 8 NM (3 min)
+    # Pesada (H) delante
+    ("H", "H"): (4.0, None),   # 4 NM (sólo distancia)
+    ("H", "M"): (5.0, 120),    # 5 NM (2 min)
+    ("H", "L"): (6.0, 120),    # 6 NM (2 min)
+    # Media (M) delante
+    ("M", "L"): (5.0, 120),    # 5 NM (2 min)
+    # Cualquier otra pareja → no aplica (return None desde get_wake_separation)
 }
 
 
 # ---------------------------------------------------------------------------
 # WAKE_TMA — Separación por estela en TMA (sólo distancia, NM)
-# Fuente: PDF P3 pág. 23 / ICAO Doc 4444
+# Igual que WAKE_TWR pero sin componente temporal. Pares no listados en el
+# PDF pág. 23 → no aplica (return None).
+# Fuente: PDF P3 pág. 23.
 # ---------------------------------------------------------------------------
 WAKE_TMA: Dict[Tuple[str, str], float] = {
-    ("J", "J"): 4.0,
     ("J", "H"): 6.0,
     ("J", "M"): 7.0,
     ("J", "L"): 8.0,
-    ("H", "J"): 0.0,
     ("H", "H"): 4.0,
     ("H", "M"): 5.0,
     ("H", "L"): 6.0,
-    ("M", "J"): 0.0,
-    ("M", "H"): 0.0,
-    ("M", "M"): 3.0,
     ("M", "L"): 5.0,
-    ("L", "J"): 0.0,
-    ("L", "H"): 0.0,
-    ("L", "M"): 0.0,
-    ("L", "L"): 3.0,
 }
 
 
@@ -138,31 +134,40 @@ LOA_TABLE: Dict[Tuple[str, str, str], float] = {}
 
 
 def _fill_loa() -> None:
-    # Valores por defecto basados en pág. 25 PDF.
-    # "same" = misma familia de SID, "diff" = familias distintas.
-    base_same = {
-        ("HP", "HP"): 5.0, ("HP", "R"): 5.0,  ("HP", "LP"): 6.0,
-        ("HP", "NR+"): 7.0, ("HP", "NR"): 8.0, ("HP", "NR-"): 9.0,
+    """Carga la tabla LoA según la pág. 25 del PDF P3.
 
-        ("R",  "HP"): 4.0, ("R",  "R"): 5.0,  ("R",  "LP"): 6.0,
-        ("R",  "NR+"): 7.0, ("R",  "NR"): 8.0, ("R",  "NR-"): 9.0,
+    Cada entrada es (misma_sid_NM, distinta_sid_NM). Las filas donde el PDF
+    indica un único valor (e.g. "3 NM" sin distinción) se codifican con el
+    mismo valor en ambas columnas.
 
-        ("LP", "HP"): 3.0, ("LP", "R"): 4.0,  ("LP", "LP"): 5.0,
-        ("LP", "NR+"): 6.0, ("LP", "NR"): 7.0, ("LP", "NR-"): 8.0,
-
-        ("NR+", "HP"): 3.0, ("NR+", "R"): 3.0, ("NR+", "LP"): 4.0,
-        ("NR+", "NR+"): 5.0, ("NR+", "NR"): 6.0, ("NR+", "NR-"): 7.0,
-
-        ("NR",  "HP"): 3.0, ("NR",  "R"): 3.0, ("NR",  "LP"): 3.0,
-        ("NR",  "NR+"): 4.0, ("NR",  "NR"): 5.0, ("NR",  "NR-"): 6.0,
-
-        ("NR-", "HP"): 3.0, ("NR-", "R"): 3.0, ("NR-", "LP"): 3.0,
-        ("NR-", "NR+"): 3.0, ("NR-", "NR"): 4.0, ("NR-", "NR-"): 5.0,
+    Lógica física: un precedente lento (NR+/NR-/NR) con un sucesor rápido
+    (HP/R/LP) requiere mucha más separación porque el sucesor alcanza al
+    precedente. La tabla NO es simétrica.
+    """
+    # (precedente, siguiente): (misma_SID, distinta_SID)
+    pdf_values: Dict[Tuple[str, str], Tuple[float, float]] = {
+        # Precedente HP
+        ("HP",  "HP"): (5.0, 3.0), ("HP",  "R"):  (5.0, 3.0), ("HP",  "LP"): (5.0, 3.0),
+        ("HP",  "NR+"): (3.0, 3.0), ("HP",  "NR-"): (3.0, 3.0), ("HP",  "NR"): (3.0, 3.0),
+        # Precedente R (Reactor estándar)
+        ("R",   "HP"): (7.0, 5.0), ("R",   "R"):  (5.0, 3.0), ("R",   "LP"): (5.0, 3.0),
+        ("R",   "NR+"): (3.0, 3.0), ("R",   "NR-"): (3.0, 3.0), ("R",   "NR"): (3.0, 3.0),
+        # Precedente LP
+        ("LP",  "HP"): (8.0, 6.0), ("LP",  "R"):  (6.0, 4.0), ("LP",  "LP"): (5.0, 3.0),
+        ("LP",  "NR+"): (3.0, 3.0), ("LP",  "NR-"): (3.0, 3.0), ("LP",  "NR"): (3.0, 3.0),
+        # Precedente NR+ (TAS > 210 kt)
+        ("NR+", "HP"): (11.0, 8.0), ("NR+", "R"):  (9.0, 6.0), ("NR+", "LP"): (9.0, 6.0),
+        ("NR+", "NR+"): (5.0, 3.0), ("NR+", "NR-"): (3.0, 3.0), ("NR+", "NR"): (3.0, 3.0),
+        # Precedente NR- (160 < TAS ≤ 210 kt)
+        ("NR-", "HP"): (9.0, 9.0), ("NR-", "R"):  (9.0, 9.0), ("NR-", "LP"): (9.0, 9.0),
+        ("NR-", "NR+"): (9.0, 6.0), ("NR-", "NR-"): (5.0, 3.0), ("NR-", "NR"): (3.0, 3.0),
+        # Precedente NR / No-Reactor (TAS < 160 kt)
+        ("NR",  "HP"): (9.0, 9.0), ("NR",  "R"):  (9.0, 9.0), ("NR",  "LP"): (9.0, 9.0),
+        ("NR",  "NR+"): (9.0, 9.0), ("NR",  "NR-"): (9.0, 9.0), ("NR",  "NR"): (5.0, 3.0),
     }
-    # Familias distintas: misma estructura pero relajada en 2 NM (mínimo 3 NM radar).
-    for (a, b), v in base_same.items():
-        LOA_TABLE[(a, b, "same")] = v
-        LOA_TABLE[(a, b, "diff")] = max(3.0, v - 2.0)
+    for (a, b), (v_same, v_diff) in pdf_values.items():
+        LOA_TABLE[(a, b, "same")] = v_same
+        LOA_TABLE[(a, b, "diff")] = v_diff
 
 
 _fill_loa()

@@ -17,6 +17,7 @@ from ...services import turn_detection as turn_svc
 from ...services import nadp as nadp_svc
 from ...services import threshold_analysis as threshold_svc
 from ...services import stats as stats_svc
+from ...services import combined_export as combined_svc
 from fastapi import Query
 from fastapi.responses import PlainTextResponse
 from ...data_processing.csv_loader import CSVLoader
@@ -188,9 +189,14 @@ async def mvp_upload_flight_plan(file: UploadFile = File(...)) -> dict[str, obje
 
         loader = FlightPlanLoader()
         fp_df = loader.load(file_content=content)
+        sids_inferred = 0
+        try:
+            sids_inferred = loader.infer_missing_sids()
+        except Exception as exc:
+            logger.warning("SID inference failed during flight-plan upload: %s", exc)
 
         # Store flight plan
-        set_flight_plan(fp_df, filename=file.filename)
+        set_flight_plan(loader.df, filename=file.filename)
 
         # If radar data is already loaded, merge automatically
         merged_rows = None
@@ -208,8 +214,9 @@ async def mvp_upload_flight_plan(file: UploadFile = File(...)) -> dict[str, obje
         response: dict[str, object] = {
             "status": "success",
             "filename": file.filename,
-            "rows": len(fp_df),
-            "columns": len(fp_df.columns),
+            "rows": len(loader.df) if loader.df is not None else len(fp_df),
+            "columns": len(loader.df.columns) if loader.df is not None else len(fp_df.columns),
+            "sids_inferred_from_route": sids_inferred,
         }
         if merged_rows is not None:
             response["merged_radar_rows"] = merged_rows
@@ -447,6 +454,38 @@ def mvp_get_stats(
     except Exception as exc:
         logger.exception("Stats computation failed")
         raise HTTPException(status_code=500, detail=f"Stats error: {exc}")
+
+
+@router.get("/mvp/combined-results", response_model=dict[str, object])
+def mvp_get_combined_results(format: str = "json") -> dict[str, object] | PlainTextResponse:
+    """Exporta en un unico dataset los resultados por despegue.
+
+    Cada fila representa un despegue 24L/06R. Las separaciones se asignan al
+    segundo avion de cada pareja consecutiva; viraje y NADP se rellenan solo
+    cuando aplican a salidas 24L.
+    """
+    df = get_processed_data()
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No processed data available. Upload a radar CSV first.")
+
+    try:
+        result_df = combined_svc.compute_combined_results(df)
+    except Exception as exc:
+        logger.exception("Combined export failed")
+        raise HTTPException(status_code=500, detail=f"Combined export error: {exc}")
+
+    if format.lower() == "csv":
+        return PlainTextResponse(content=combined_svc.to_csv(result_df), media_type="text/csv")
+
+    if result_df.empty:
+        return {"total_departures": 0, "metrics": {}, "rows": []}
+
+    rows = result_df.replace({np.nan: None}).to_dict(orient="records")
+    return {
+        "total_departures": len(rows),
+        "metrics": combined_svc.summary_metrics(result_df),
+        "rows": rows,
+    }
 
 
 @router.get("/mvp/info", response_model=dict[str, object])

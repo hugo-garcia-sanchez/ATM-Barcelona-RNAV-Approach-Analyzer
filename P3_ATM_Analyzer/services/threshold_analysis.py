@@ -37,6 +37,7 @@ class ThresholdEvent:
     sid: str | None
     aircraft_type: str | None
     atot: str | None
+    passes_thr_filter: bool
     cross_time: str | None
     cross_lat: float | None
     cross_lon: float | None
@@ -49,10 +50,20 @@ class ThresholdEvent:
 
 
 def _thr_for(runway: str) -> tuple[float, float] | None:
+    """Devuelve el punto de medida del cruce de cabecera para un DESPEGUE
+    desde `runway`. Para un despegue, el avión arranca rodaje en su propio
+    umbral (THR de su pista) y, ya en vuelo, sobrevuela la cabecera OPUESTA
+    (DER = Departure End of Runway). El PDF pág. 60 marca el filtro blanco
+    en el DER, no en el THR de origen → usamos las coordenadas de la THR
+    opuesta:
+
+    - DEP 24L → DER 24L = THR_06R (extremo SW de la pista)
+    - DEP 06R → DER 06R = THR_24L (extremo NE de la pista)
+    """
     if runway == "24L":
-        return rt.THR_24L
-    if runway == "06R":
         return rt.THR_06R
+    if runway == "06R":
+        return rt.THR_24L
     return None
 
 
@@ -181,21 +192,35 @@ def compute_thresholds(processed_df: pd.DataFrame) -> pd.DataFrame:
         thr = _thr_for(d.runway)
         if thr is None:
             continue
-        box = _filter_box(d.track, thr)
-        if box.empty:
-            continue
-
-        cross = _interp_at_min_dist(box, thr)
-        if cross is None:
-            continue
-
         turn_ts = turn_lookup.get(d.callsign)
+        box = _filter_box(d.track, thr)
+        passes_filter = not box.empty
+        cross = _interp_at_min_dist(box, thr) if passes_filter else None
+        nearest = _interp_at_min_dist(d.track, thr)
+
+        if cross is None:
+            # Mantener una fila por despegue aunque el avion no entre en el
+            # filtro del umbral. La rubrica pide contabilizar estos casos.
+            cross = {
+                "cross_time": None,
+                "cross_lat": None,
+                "cross_lon": None,
+                "cross_alt_ft": None,
+                "cross_ias_kt": None,
+                "cross_heading_deg": None,
+                "min_dist_thr_nm": (
+                    nearest.get("min_dist_thr_nm") if nearest is not None else None
+                ),
+            }
+
         turned_before = None
         if turn_ts and cross["cross_time"]:
             try:
                 turned_before = pd.Timestamp(turn_ts) < pd.Timestamp(cross["cross_time"])
             except Exception:
                 turned_before = None
+        elif turn_ts and not passes_filter and d.runway == "24L":
+            turned_before = True
 
         events.append(ThresholdEvent(
             callsign=d.callsign,
@@ -203,6 +228,7 @@ def compute_thresholds(processed_df: pd.DataFrame) -> pd.DataFrame:
             sid=d.sid,
             aircraft_type=d.aircraft_type,
             atot=d.atot.isoformat() if d.atot is not None else None,
+            passes_thr_filter=passes_filter,
             cross_time=cross["cross_time"],
             cross_lat=cross["cross_lat"],
             cross_lon=cross["cross_lon"],
@@ -224,9 +250,13 @@ def summary_metrics(df: pd.DataFrame) -> dict[str, object]:
     out: dict[str, object] = {}
     for rwy, sub in df.groupby("runway"):
         total = len(sub)
-        turned = int(sub["turned_before_thr"].fillna(False).sum())
+        turned = int(sub["turned_before_thr"].eq(True).sum())
+        passed = int(sub["passes_thr_filter"].eq(True).sum()) if "passes_thr_filter" in sub.columns else total
         out[str(rwy)] = {
             "total": total,
+            "passed_thr_filter": passed,
+            "missed_thr_filter": total - passed,
+            "pct_passed_thr_filter": round(100.0 * passed / total, 2) if total else 0.0,
             "turned_before_thr": turned,
             "pct_turned_before_thr": round(100.0 * turned / total, 2) if total else 0.0,
             "ias_mean_kt": float(sub["cross_ias_kt"].mean(skipna=True)) if total else None,

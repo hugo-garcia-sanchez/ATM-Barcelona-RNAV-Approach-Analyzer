@@ -27,14 +27,25 @@ from .separations import build_departures, haversine_nm, Departure
 # ---------------------------------------------------------------------------
 # Umbrales de detección
 # ---------------------------------------------------------------------------
-# Rumbo de pista 24L ≈ 238° (224° magnético + ~14° declinación inversa). Usamos
-# una banda alrededor del rumbo nominal mientras sea válido considerar que la
-# aeronave aún no ha virado.
-RUNWAY_HDG_24L = 238.0
+# Rumbo de pista 24L: la AIP España AD-2 LEBL declara 244° (magnético) para
+# mantenimiento de rumbo de pista hasta 402 ft (PDF P3 pág. 13). Banda ±8°
+# se considera "aún no ha virado".
+RUNWAY_HDG_24L = 244.0
+# Rumbo de pista 06R: equivalente (064°) por simetría.
+RUNWAY_HDG_06R = 64.0
 HDG_BAND_DEG = 8.0          # ±8° alrededor del rumbo de pista
 ROLL_THRESHOLD_DEG = 5.0    # |RA| ≥ 5° → empieza a virar
 TURN_RATE_THRESHOLD_DPS = 1.5  # |dHDG/dt| ≥ 1.5°/s → viraje
 MIN_HOLD_SAMPLES = 3        # Debe mantenerse al menos 3 segundos
+
+# Refinamiento dentro de la ventana de hold del Roll Angle (16 s):
+# si RA es detectado a la altura t_r, el viraje pudo iniciarse hasta 16 s
+# antes. Reconstruimos el inicio buscando en [t_r-16, t_r] el primer punto
+# en que el rumbo ya se desvía del rumbo de pista por encima de este umbral.
+HDG_REFINE_BAND_DEG = 5.0
+RA_HOLD_LOOKBACK_S = 16
+TURN_SEARCH_MAX_ALT_FT = 3000.0
+TURN_SEARCH_MAX_DIST_THR_NM = 6.0
 
 
 @dataclass
@@ -47,8 +58,13 @@ class TurnEvent:
     turn_start_time: str | None
     turn_start_lat: float | None
     turn_start_lon: float | None
+    turn_start_x_m: float | None
+    turn_start_y_m: float | None
     turn_start_alt_ft: float | None
     turn_start_ias_kt: float | None
+    turn_start_roll_angle_deg: float | None
+    turn_start_heading_deg: float | None
+    turn_start_tta_deg: float | None
     turn_start_dist_thr_nm: float | None
     detection_method: str | None         # "roll", "turn_rate", "hdg_deviation"
     crosses_r234: bool | None
@@ -91,23 +107,82 @@ def _segments_intersect(
     return None
 
 
-def _check_r234_crossing(track: pd.DataFrame) -> tuple[bool, float | None, float | None]:
-    """Detecta si la traza cruza la R-234 desde DVOR BCN."""
+def _signed_side_r234(lat: float, lon: float) -> float:
+    """Signo (producto cruzado 2D) del punto respecto a la recta DVOR→costa.
+
+    La línea se trata como recta infinita; el signo del producto cruzado entre
+    el vector dirección y el vector hacia el punto distingue de qué lado está.
+    """
     r_a, r_b = rt.R234_LINE_ENDPOINTS
+    # x = lon, y = lat (consistente con _segments_intersect)
+    ax, ay = r_a[1], r_a[0]
+    bx, by = r_b[1], r_b[0]
+    px, py = lon, lat
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+
+
+def _check_r234_crossing(track: pd.DataFrame) -> tuple[bool, float | None, float | None]:
+    """¿La traza cruza la radial R-234 desde DVOR BCN?
+
+    R-234 es una semirrecta desde DVOR BCN; el segmento DVOR→costa (en el PDF
+    pág. 56) es sólo un tramo representativo. Para detectar si una trayectoria
+    "atraviesa" la radial usamos el signo del producto cruzado entre la
+    dirección de la recta y el vector hacia cada fix: un cambio de signo entre
+    dos fixes consecutivos = la trayectoria cruzó la recta entre esos dos
+    puntos. Es robusto y no depende de la longitud del segmento.
+    """
     lats = track["latitude"].astype(float).to_numpy()
     lons = track["longitude"].astype(float).to_numpy()
-    for i in range(1, len(lats)):
-        p1 = (lats[i - 1], lons[i - 1])
-        p2 = (lats[i], lons[i])
-        cross = _segments_intersect(p1, p2, r_a, r_b)
-        if cross is not None:
-            return True, cross[0], cross[1]
+    if len(lats) < 2:
+        return False, None, None
+
+    sides = np.array([_signed_side_r234(la, lo) for la, lo in zip(lats, lons)])
+    prev_sign = 0  # 0 = aún no determinado (puntos exactamente sobre la línea)
+    for i, s in enumerate(sides):
+        cur_sign = 0 if s == 0 else (1 if s > 0 else -1)
+        if prev_sign != 0 and cur_sign != 0 and cur_sign != prev_sign:
+            # Interpolar lineal entre el fix anterior y el actual para hallar
+            # el punto donde |side|=0.
+            a = sides[i - 1]
+            b = sides[i]
+            t = a / (a - b) if a != b else 0.5
+            cross_lat = float(lats[i - 1] + t * (lats[i] - lats[i - 1]))
+            cross_lon = float(lons[i - 1] + t * (lons[i] - lons[i - 1]))
+            return True, cross_lat, cross_lon
+        if cur_sign != 0:
+            prev_sign = cur_sign
     return False, None, None
 
 
 # ---------------------------------------------------------------------------
 # Detección sobre una traza interpolada a 1 Hz
 # ---------------------------------------------------------------------------
+
+def _refine_with_heading(
+    track: pd.DataFrame, idx_roll: int, runway: str,
+) -> int:
+    """Refina el índice detectado por roll usando el HDG dentro de la ventana
+    de retención de 16 s previa.
+
+    El roll angle (RA) sólo se actualiza cada 16 s, pero el HDG cada 4 s. Si
+    RA pasa a ≥5° en `idx_roll`, el viraje empezó *en algún momento* dentro
+    de los 16 s anteriores. Buscamos en esa ventana el primer instante en
+    que el HDG ya se había desviado del rumbo de pista — es una estimación
+    mejor del verdadero inicio de viraje.
+    """
+    if idx_roll <= 0 or "heading" not in track.columns:
+        return idx_roll
+    runway_hdg = RUNWAY_HDG_24L if runway == "24L" else RUNWAY_HDG_06R
+    hdg = track["heading"].astype(float).to_numpy()
+    window_start = max(0, idx_roll - RA_HOLD_LOOKBACK_S)
+    for j in range(window_start, idx_roll):
+        h = hdg[j]
+        if not np.isnan(h):
+            dev = abs(_angle_diff_deg(float(h), runway_hdg))
+            if dev >= HDG_REFINE_BAND_DEG:
+                return j
+    return idx_roll
+
 
 def _detect_turn_start(track: pd.DataFrame, runway: str) -> tuple[int | None, str | None]:
     """Devuelve (índice del primer fix de viraje, método). None si no detectado."""
@@ -122,7 +197,10 @@ def _detect_turn_start(track: pd.DataFrame, runway: str) -> tuple[int | None, st
         mask = np.abs(ra) >= ROLL_THRESHOLD_DEG
         idx = _first_sustained(mask, MIN_HOLD_SAMPLES)
         if idx is not None:
-            return idx, "roll"
+            # El RA se actualiza cada 16 s — afinar hacia atrás con el HDG
+            # (que se actualiza cada 4 s) para acercarnos al inicio real.
+            refined = _refine_with_heading(track, idx, runway)
+            return refined, ("roll+hdg" if refined != idx else "roll")
 
     # 2) Rate of turn: |dHDG/dt| ≥ umbral.
     hdg_col = "heading" if "heading" in track.columns else ("tta" if "tta" in track.columns else None)
@@ -136,10 +214,11 @@ def _detect_turn_start(track: pd.DataFrame, runway: str) -> tuple[int | None, st
         if idx is not None:
             return idx, "turn_rate"
 
-    # 3) Desviación del rumbo de pista (solo 24L).
-    if runway == "24L" and hdg_col is not None:
+    # 3) Desviación del rumbo de pista (24L o 06R).
+    if hdg_col is not None:
+        runway_hdg = RUNWAY_HDG_24L if runway == "24L" else RUNWAY_HDG_06R
         hdg = track[hdg_col].astype(float).to_numpy()
-        deviation = np.array([abs(_angle_diff_deg(h, RUNWAY_HDG_24L)) for h in hdg])
+        deviation = np.array([abs(_angle_diff_deg(h, runway_hdg)) for h in hdg])
         mask = deviation >= HDG_BAND_DEG
         idx = _first_sustained(mask, MIN_HOLD_SAMPLES)
         if idx is not None:
@@ -189,7 +268,19 @@ def compute_turns(processed_df: pd.DataFrame) -> pd.DataFrame:
         if sub.empty:
             continue
 
-        idx, method = _detect_turn_start(sub, d.runway)
+        alt_col = "altitude_qnh_ft" if "altitude_qnh_ft" in sub.columns else "altitude"
+        search_mask = pd.Series(True, index=sub.index)
+        if alt_col in sub.columns:
+            search_mask &= sub[alt_col].astype(float) <= TURN_SEARCH_MAX_ALT_FT
+        if {"latitude", "longitude"}.issubset(sub.columns):
+            dist_thr = sub.apply(
+                lambda r: haversine_nm(float(r["latitude"]), float(r["longitude"]), thr_24l[0], thr_24l[1]),
+                axis=1,
+            )
+            search_mask &= dist_thr <= TURN_SEARCH_MAX_DIST_THR_NM
+        search = sub.loc[search_mask].reset_index(drop=True)
+
+        idx, method = _detect_turn_start(search, d.runway)
         crosses, cx_lat, cx_lon = _check_r234_crossing(sub)
 
         if idx is None:
@@ -198,16 +289,25 @@ def compute_turns(processed_df: pd.DataFrame) -> pd.DataFrame:
                 aircraft_type=d.aircraft_type,
                 atot=d.atot.isoformat() if d.atot is not None else None,
                 turn_start_time=None, turn_start_lat=None, turn_start_lon=None,
+                turn_start_x_m=None, turn_start_y_m=None,
                 turn_start_alt_ft=None, turn_start_ias_kt=None,
+                turn_start_roll_angle_deg=None,
+                turn_start_heading_deg=None,
+                turn_start_tta_deg=None,
                 turn_start_dist_thr_nm=None, detection_method=None,
                 crosses_r234=crosses, r234_cross_lat=cx_lat, r234_cross_lon=cx_lon,
             ))
             continue
 
-        row = sub.iloc[idx]
-        alt_col = "altitude_qnh_ft" if "altitude_qnh_ft" in sub.columns else "altitude"
+        row = search.iloc[idx]
+        alt_col = "altitude_qnh_ft" if "altitude_qnh_ft" in search.columns else "altitude"
         alt_val = float(row.get(alt_col)) if pd.notna(row.get(alt_col)) else None
         ias_val = float(row.get("ias")) if "ias" in sub.columns and pd.notna(row.get("ias")) else None
+        x_val = float(row.get("x_m")) if "x_m" in sub.columns and pd.notna(row.get("x_m")) else None
+        y_val = float(row.get("y_m")) if "y_m" in sub.columns and pd.notna(row.get("y_m")) else None
+        roll_val = float(row.get("roll_angle")) if "roll_angle" in sub.columns and pd.notna(row.get("roll_angle")) else None
+        hdg_val = float(row.get("heading")) if "heading" in sub.columns and pd.notna(row.get("heading")) else None
+        tta_val = float(row.get("tta")) if "tta" in sub.columns and pd.notna(row.get("tta")) else None
         lat = float(row["latitude"])
         lon = float(row["longitude"])
         d_thr = haversine_nm(lat, lon, thr_24l[0], thr_24l[1])
@@ -222,8 +322,13 @@ def compute_turns(processed_df: pd.DataFrame) -> pd.DataFrame:
             turn_start_time=pd.Timestamp(ts).isoformat() if pd.notna(ts) else None,
             turn_start_lat=lat,
             turn_start_lon=lon,
+            turn_start_x_m=x_val,
+            turn_start_y_m=y_val,
             turn_start_alt_ft=alt_val,
             turn_start_ias_kt=ias_val,
+            turn_start_roll_angle_deg=roll_val,
+            turn_start_heading_deg=hdg_val,
+            turn_start_tta_deg=tta_val,
             turn_start_dist_thr_nm=d_thr,
             detection_method=method,
             crosses_r234=crosses,

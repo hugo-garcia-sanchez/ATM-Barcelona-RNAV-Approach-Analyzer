@@ -1,5 +1,6 @@
 """Carga y merge de planes de vuelo con datos radar ASTERIX."""
 import io
+import re
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -9,12 +10,17 @@ FLIGHT_PLAN_COLUMN_PATTERNS: dict[str, list[str]] = {
     "callsign":      ["indicativo", "callsign", "ti", "indicatif"],
     "destination":   ["destino", "destination", "dest", "adep_ades"],
     "atot":          ["horadespegue", "atot", "hora_despegue", "departure_time", "tow"],
-    "route":         ["ruta", "route", "sid_route"],
+    "route":         ["rutasacta", "ruta", "route", "sid_route"],
     "aircraft_type": ["tipoaeronave", "aircraft_type", "tipo_aeronave", "ac_type"],
     "wake_cat":      ["estela", "wake_cat", "wake", "turbulencia"],
     "sid":           ["procdesp", "sid", "proc_desp", "sid_name"],
     "runway":        ["pistadesp", "runway", "pista_desp", "rwy"],
 }
+
+
+# Token candidate: 4-5 letras mayúsculas (formato ICAO de waypoint). Captura
+# tanto "DIPES" suelto como dentro de paréntesis "012(DIPES)".
+_WAYPOINT_TOKEN_RE = re.compile(r"\b([A-Z]{4,5})\b")
 
 # Mapping from various wake turbulence codes/words to canonical Spanish names
 WAKE_MAP: dict[str, str] = {
@@ -146,8 +152,81 @@ class FlightPlanLoader:
         if "atot" in df.columns:
             df["atot"] = df["atot"].apply(_atot_to_timestamp)
 
+        # Normaliza el SID: trata "-", vacío, "NaN" como ausencia.
+        if "sid" in df.columns:
+            sid_str = df["sid"].astype(str).str.strip().str.upper()
+            df["sid"] = sid_str.where(
+                ~sid_str.isin(["", "-", "NAN", "NONE"]),
+                other=pd.NA,
+            )
+
         self.df = df
         return df
+
+    def infer_missing_sids(
+        self,
+        sid_24l_roots: list[str] | None = None,
+        sid_06r_roots: list[str] | None = None,
+    ) -> int:
+        """Rellena `sid` para filas con `ProcDesp` vacío usando RutaSACTA.
+
+        El PDF P3 pág. 40 dice: "*Cuando no aparezca la SID, hay que buscar
+        en el campo Ruta para poder determinarla*". Para ello escaneamos el
+        campo `route` en orden y devolvemos el primer waypoint de 4-5 letras
+        que aparezca en la lista de raíces de SID conocidas para la pista
+        del despegue. Se construye el nombre canonico `<root>1<suffix>`
+        (suffix C/R según pista) — `_sid_root()` recortará el sufijo.
+
+        Returns:
+            Número de filas con SID recién asignado.
+        """
+        if self.df is None or "route" not in self.df.columns:
+            return 0
+
+        # Carga las raíces si no se pasan explícitamente (lazy import para
+        # evitar dependencia circular en tiempo de import).
+        if sid_24l_roots is None or sid_06r_roots is None:
+            from ..services import reference_tables as rt
+            sid_24l_roots = sid_24l_roots or [
+                r for sids in rt.SID_FAMILIES_24L.values() for r in sids
+            ]
+            sid_06r_roots = sid_06r_roots or [
+                r for sids in rt.SID_FAMILIES_06R.values() for r in sids
+            ]
+        roots_by_rwy = {
+            "24L": set(r.upper() for r in sid_24l_roots),
+            "06R": set(r.upper() for r in sid_06r_roots),
+        }
+        suffix_by_rwy = {"24L": "C", "06R": "R"}
+
+        filled = 0
+        sid_col = self.df["sid"] if "sid" in self.df.columns else pd.Series([pd.NA] * len(self.df))
+        for idx in self.df.index:
+            current = sid_col.iloc[self.df.index.get_loc(idx)] if "sid" in self.df.columns else pd.NA
+            if pd.notna(current) and str(current).strip() not in ("", "-"):
+                continue
+            rwy_raw = self.df.at[idx, "runway"] if "runway" in self.df.columns else None
+            rwy = None
+            if pd.notna(rwy_raw):
+                r = str(rwy_raw).upper()
+                if "24L" in r:
+                    rwy = "24L"
+                elif "06R" in r:
+                    rwy = "06R"
+            if rwy is None:
+                continue
+            route = self.df.at[idx, "route"]
+            if pd.isna(route):
+                continue
+            text = str(route).upper()
+            candidates = _WAYPOINT_TOKEN_RE.findall(text)
+            roots = roots_by_rwy.get(rwy, set())
+            for tok in candidates:
+                if tok in roots:
+                    self.df.at[idx, "sid"] = f"{tok}1{suffix_by_rwy[rwy]}"
+                    filled += 1
+                    break
+        return filled
 
     def merge_with_radar(
         self, radar_df: pd.DataFrame, time_window_minutes: float = 5.0

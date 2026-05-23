@@ -32,11 +32,15 @@ class NadpEvent:
     runway: str
     sid: str | None
     aircraft_type: str | None
+    wake: str | None
     atot: str | None
     ias_at_800ft: float | None
+    alt_at_800ft: float | None
     ias_at_3000ft: float | None
+    alt_at_3000ft: float | None
     delta_ias_kt: float | None
     nadp: str | None              # "NADP1" | "NADP2" | None
+    threshold_kt: float
     time_at_800ft: str | None
     time_at_3000ft: str | None
 
@@ -110,11 +114,15 @@ def compute_nadp(
             runway=d.runway,
             sid=d.sid,
             aircraft_type=d.aircraft_type,
+            wake=d.wake,
             atot=d.atot.isoformat() if d.atot is not None else None,
             ias_at_800ft=ias_low,
+            alt_at_800ft=ALT_LOW_FT if ias_low is not None else None,
             ias_at_3000ft=ias_high,
+            alt_at_3000ft=ALT_HIGH_FT if ias_high is not None else None,
             delta_ias_kt=delta,
             nadp=nadp,
+            threshold_kt=threshold_kt,
             time_at_800ft=t_low.isoformat() if t_low is not None else None,
             time_at_3000ft=t_high.isoformat() if t_high is not None else None,
         ))
