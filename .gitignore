@@ -27,6 +27,12 @@ htmlcov/
 .planning/
 agents/
 
+# Entregables y documentacion de trabajo local
+memoria.md
+memorioa.md
+project_plan/
+test_fixes.py
+
 # Base de datos (datos generados por la app)
 *.db
 *.sqlite3
