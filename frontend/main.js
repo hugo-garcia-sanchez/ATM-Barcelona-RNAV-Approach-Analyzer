@@ -1,36 +1,20 @@
 /**
- * ATM Analyzer - Main Application Logic
+ * ATM Barcelona RNAV Approach Analyzer - Frontend MVP
  */
 
-// Constants
-const BARCELONA_CENTER = { lat: 41.2974, lng: 2.0833 };
-const DEFAULT_ZOOM = 12;
-const RUNWAY_24L = { lat: 41.2865, lng: 2.0759, name: "RWY 24L" };
-const RUNWAY_06R = { lat: 41.2870, lng: 2.0760, name: "RWY 06R" };
+// ============================================
+// STATE MANAGEMENT
+// ============================================
 
-// State Management
 const state = {
   currentData: null,
-  allRecords: [],
-  displayRecords: [],
-  currentPage: 0,
-  pageSize: 500,  // FIX 3: Increased from 100 to 500 records per page
-  filters: {
-    minAlt: null,
-    maxAlt: null,
-    minSpeed: null,
-    maxSpeed: null,
-    timeFrom: "",
-    timeTo: "",
-    callsign: "",
-  },
   map: null,
   markers: {},
+  allRecords: [], // All records fetched from backend
+  displayRecords: [], // Filtered records
+  currentPage: 1,
+  pageSize: 100, // Show 100 rows per page for better performance
 };
-
-// ============================================
-// DOM ELEMENTS
-// ============================================
 
 const elements = {
   statusText: document.getElementById("statusText"),
@@ -58,6 +42,9 @@ const elements = {
   exportBtn: document.getElementById("exportBtn"),
   mapContainer: document.getElementById("map"),
 };
+
+const RUNWAY_24L = { lat: 41.2858, lng: 2.0725, name: "RWY 24L" };
+const RUNWAY_06R = { lat: 41.3045, lng: 2.1001, name: "RWY 06R" };
 
 // ============================================
 // UTILITY FUNCTIONS
@@ -156,30 +143,32 @@ async function handleFileUpload(file) {
 }
 
 function clearData() {
+  if (!confirm("Are you sure you want to clear all data?")) return;
+  
   state.currentData = null;
   state.allRecords = [];
   state.displayRecords = [];
-  state.currentPage = 0;
-
+  state.currentPage = 1;
+  
   elements.datasetInfo.innerHTML = "<p>No data loaded</p>";
   elements.tableBody.innerHTML =
-    '<tr><td colspan="6" class="center-text">No data loaded. Upload a CSV file to begin.</td></tr>';
+    '<tr><td colspan="8" class="center-text">No data loaded. Upload a CSV file to begin.</td></tr>';
   elements.recordCount.textContent = "0 records";
+  elements.pageInfo.textContent = "Page 0 of 0";
   elements.clearBtn.disabled = true;
   elements.exportBtn.disabled = true;
-
-  // FIX 5: Reset file input so "Choose File" works again
+  elements.prevPageBtn.disabled = true;
+  elements.nextPageBtn.disabled = true;
   elements.fileInput.value = "";
+  elements.filterPreviewCount.textContent = "—";
 
-  if (elements.filterPreviewCount) elements.filterPreviewCount.textContent = "—";
-
-  setStatus("Data cleared", false);
-
-  // Clear map
   if (state.map) {
-    Object.values(state.markers).forEach((marker) => state.map.removeLayer(marker));
-    state.markers = {};
+    state.map.remove();
+    state.map = null;
+    elements.mapContainer.innerHTML = "";
   }
+
+  setStatus("Ready", false);
 }
 
 // ============================================
@@ -190,9 +179,11 @@ async function loadTableData() {
   setStatus("Loading data...", true);
 
   try {
-    const response = await api.getData(10000, 0);
+    // Increase limit to 100,000 to fetch everything in one go (backend updated)
+    const response = await api.getData(100000, 0);
     state.allRecords = response.rows;
     state.displayRecords = response.rows;
+    state.currentPage = 1;
 
     applyFilters();
     renderTablePage();
@@ -218,9 +209,28 @@ function updateDatasetInfo(info) {
 // FILTERING
 // ============================================
 
+function readFilterInputs() {
+  return {
+    callsign: elements.callsignFilter.value.toUpperCase(),
+    minAlt: elements.minAlt.value ? Number(elements.minAlt.value) : null,
+    maxAlt: elements.maxAlt.value ? Number(elements.maxAlt.value) : null,
+    minSpeed: elements.minSpeed.value ? Number(elements.minSpeed.value) : null,
+    maxSpeed: elements.maxSpeed.value ? Number(elements.maxSpeed.value) : null,
+    timeFrom: elements.timeFrom.value,
+    timeTo: elements.timeTo.value,
+  };
+}
+
 function setupFilterHandlers() {
-  elements.filterBtn.addEventListener("click", applyFilters);
-  elements.clearFiltersBtn.addEventListener("click", clearFilters);
+  elements.filterBtn.addEventListener("click", () => {
+    state.currentPage = 1;
+    applyFilters();
+    renderTablePage();
+  });
+
+  elements.clearFiltersBtn.addEventListener("click", () => {
+    clearFilters();
+  });
 
   const inputs = [
     elements.minAlt, elements.maxAlt,
@@ -230,23 +240,37 @@ function setupFilterHandlers() {
   ];
   inputs.forEach((input) => {
     input.addEventListener("keypress", (e) => {
-      if (e.key === "Enter") applyFilters();
+      if (e.key === "Enter") {
+        state.currentPage = 1;
+        applyFilters();
+        renderTablePage();
+      }
     });
     input.addEventListener("input", updateFilterPreview);
     input.addEventListener("change", updateFilterPreview);
   });
 }
 
-function readFilterInputs() {
-  return {
-    minAlt: elements.minAlt.value ? parseFloat(elements.minAlt.value) : null,
-    maxAlt: elements.maxAlt.value ? parseFloat(elements.maxAlt.value) : null,
-    minSpeed: elements.minSpeed.value ? parseFloat(elements.minSpeed.value) : null,
-    maxSpeed: elements.maxSpeed.value ? parseFloat(elements.maxSpeed.value) : null,
-    timeFrom: elements.timeFrom.value || "",
-    timeTo: elements.timeTo.value || "",
-    callsign: elements.callsignFilter.value.toUpperCase(),
-  };
+function clearFilters() {
+  elements.callsignFilter.value = "";
+  elements.minAlt.value = "";
+  elements.maxAlt.value = "";
+  elements.minSpeed.value = "";
+  elements.maxSpeed.value = "";
+  elements.timeFrom.value = "";
+  elements.timeTo.value = "";
+    
+  state.currentPage = 1;
+  applyFilters();
+  renderTablePage();
+}
+
+function applyFilters() {
+  const f = readFilterInputs();
+  state.displayRecords = state.allRecords.filter((r) => matchesFilters(r, f));
+  updateMapMarkers();
+  updateFilterPreview();
+  elements.exportBtn.disabled = state.displayRecords.length === 0;
 }
 
 function timeToMinutes(hhmm) {
@@ -300,90 +324,58 @@ function updateFilterPreview() {
   elements.filterPreviewCount.textContent = `${count.toLocaleString()} / ${state.allRecords.length.toLocaleString()}`;
 }
 
-function applyFilters() {
-  const f = readFilterInputs();
-  state.filters = f;
-  state.displayRecords = state.allRecords.filter((r) => matchesFilters(r, f));
-
-  state.currentPage = 0;
-  renderTablePage();
-  updateMapMarkers();
-  updateFilterPreview();
-
-  setStatus(`Filtered: ${state.displayRecords.length} records`, false);
-}
-
-function clearFilters() {
-  elements.minAlt.value = "";
-  elements.maxAlt.value = "";
-  elements.minSpeed.value = "";
-  elements.maxSpeed.value = "";
-  elements.timeFrom.value = "";
-  elements.timeTo.value = "";
-  elements.callsignFilter.value = "";
-  applyFilters();
-}
-
 // ============================================
 // TABLE RENDERING
 // ============================================
 
 function renderTablePage() {
-  const start = state.currentPage * state.pageSize;
-  const end = start + state.pageSize;
-  const pageRecords = state.displayRecords.slice(start, end);
+  const total = state.displayRecords.length;
+  const totalPages = Math.ceil(total / state.pageSize) || 0;
 
-  const tbody = elements.tableBody;
-  const thead = elements.tableBody.parentElement.querySelector("thead");
-  
-  // FIX 2: Generate columns dynamically from first record
-  if (pageRecords.length > 0 && state.displayRecords.length > 0) {
-    const firstRecord = state.displayRecords[0];
-    const columns = Object.keys(firstRecord);
-    
-    // Update header
-    const headerRow = thead.querySelector("tr");
-    headerRow.innerHTML = columns.map(col => `<th>${col}</th>`).join("");
-  }
+  // Clamp current page
+  if (state.currentPage > totalPages) state.currentPage = totalPages;
+  if (state.currentPage < 1 && totalPages > 0) state.currentPage = 1;
 
-  tbody.innerHTML = "";
+  const start = (state.currentPage - 1) * state.pageSize;
+  const end = Math.min(start + state.pageSize, total);
+  const pageSlice = state.displayRecords.slice(start, end);
 
-  if (pageRecords.length === 0) {
-    const colCount = state.displayRecords.length > 0 ? Object.keys(state.displayRecords[0]).length : 6;
-    tbody.innerHTML =
-      `<tr><td colspan="${colCount}" class="center-text">No records match the filters</td></tr>`;
+  elements.tableBody.innerHTML = "";
+  if (pageSlice.length === 0) {
+    const message = state.allRecords.length
+      ? "No records match the filters"
+      : "No data loaded. Upload a CSV file to begin.";
+    elements.tableBody.innerHTML = `<tr><td colspan="8" class="center-text">${message}</td></tr>`;
   } else {
-    pageRecords.forEach((record) => {
+    pageSlice.forEach((record) => {
       const row = document.createElement("tr");
-      const columns = Object.keys(record);
-      const cells = columns.map(col => {
-        const value = record[col];
-        // Format special columns
-        if (col === "time") return formatTime(value);
-        if (col === "latitude" || col === "longitude") return formatCoordinate(value);
-        if (col === "altitude") return formatAltitude(value);
-        if (col === "speed") return formatSpeed(value);
-        return value || "-";
-      });
-      row.innerHTML = cells.map(cell => `<td>${cell}</td>`).join("");
-      tbody.appendChild(row);
+      row.innerHTML = `
+        <td>${formatTime(record.time)}</td>
+        <td>${record.callsign || "-"}</td>
+        <td>${record.track_number || "-"}</td>
+        <td>${formatCoordinate(record.latitude)}</td>
+        <td>${formatCoordinate(record.longitude)}</td>
+        <td>${formatAltitude(record.altitude)}</td>
+        <td>${formatSpeed(record.speed)}</td>
+        <td>${record.runway || "-"}</td>
+      `;
+      elements.tableBody.appendChild(row);
     });
   }
 
-  const totalPages = Math.ceil(state.displayRecords.length / state.pageSize);
-  elements.pageInfo.textContent = `Page ${state.currentPage + 1} of ${Math.max(1, totalPages)}`;
-  elements.prevPageBtn.disabled = state.currentPage === 0;
-  elements.nextPageBtn.disabled = state.currentPage >= totalPages - 1;
-
-  const totalRecords = state.displayRecords.length;
-  const rangeStart = totalRecords > 0 ? start + 1 : 0;
-  const rangeEnd = Math.min(end, totalRecords);
-  elements.recordCount.textContent = `Viewing ${rangeStart}-${rangeEnd} of ${totalRecords.toLocaleString()} records`;
+  const rangeStart = total > 0 ? start + 1 : 0;
+  const rangeEnd = Math.min(end, total);
+  elements.recordCount.textContent = total > 0
+    ? `Viewing ${rangeStart}-${rangeEnd} of ${total.toLocaleString()} records`
+    : "0 records";
+  elements.pageInfo.textContent = `Page ${totalPages > 0 ? state.currentPage : 0} of ${totalPages}`;
+  elements.prevPageBtn.disabled = state.currentPage <= 1;
+  elements.nextPageBtn.disabled = state.currentPage >= totalPages;
 }
 
 function setupPaginationHandlers() {
   elements.prevPageBtn.addEventListener("click", () => {
-    if (state.currentPage > 0) {
+    if (state.currentPage > 1) {
       state.currentPage--;
       renderTablePage();
     }
@@ -391,7 +383,7 @@ function setupPaginationHandlers() {
 
   elements.nextPageBtn.addEventListener("click", () => {
     const totalPages = Math.ceil(state.displayRecords.length / state.pageSize);
-    if (state.currentPage < totalPages - 1) {
+    if (state.currentPage < totalPages) {
       state.currentPage++;
       renderTablePage();
     }
@@ -405,18 +397,20 @@ function setupPaginationHandlers() {
 function initializeMap() {
   if (state.map) return;
 
-  state.map = L.map(elements.mapContainer).setView(BARCELONA_CENTER, DEFAULT_ZOOM);
+  // Use Canvas renderer for better performance with many points
+  state.map = L.map(elements.mapContainer, {
+    preferCanvas: true
+  }).setView([41.2974, 2.0833], 13);
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap contributors",
-    maxZoom: 19,
   }).addTo(state.map);
 
+  // Add runway thresholds
   L.circleMarker(RUNWAY_24L, {
     radius: 8,
     color: "red",
-    weight: 2,
-    fillOpacity: 0.5,
+    fillOpacity: 0.8,
     fillColor: "red",
   })
     .bindPopup(`${RUNWAY_24L.name} - Threshold`)
@@ -425,8 +419,7 @@ function initializeMap() {
   L.circleMarker(RUNWAY_06R, {
     radius: 8,
     color: "red",
-    weight: 2,
-    fillOpacity: 0.5,
+    fillOpacity: 0.8,
     fillColor: "red",
   })
     .bindPopup(`${RUNWAY_06R.name} - Threshold`)
@@ -438,30 +431,29 @@ function initializeMap() {
 function updateMapMarkers() {
   if (!state.map) return;  // Exit if map not initialized
   
+  // Clear existing markers
   Object.values(state.markers).forEach((marker) => state.map.removeLayer(marker));
   state.markers = {};
 
+  // Render all filtered records on map (Canvas handles this well)
   state.displayRecords.forEach((record, idx) => {
     const marker = L.circleMarker(
       { lat: record.latitude, lng: record.longitude },
       {
-        radius: 5,
+        radius: 3, // Smaller radius for high density
         color: "#0077B6",
-        weight: 1,
-        fillOpacity: 0.7,
+        weight: 0.5,
+        fillOpacity: 0.5,
         fillColor: "#0077B6",
       }
     );
 
     const popupContent = `
       <strong>${record.callsign || "Unknown"}</strong><br>
-      Lat: ${formatCoordinate(record.latitude)}<br>
-      Lon: ${formatCoordinate(record.longitude)}<br>
       Alt: ${formatAltitude(record.altitude)} ft<br>
-      Time: ${formatTime(record.time)}<br>
-      Speed: ${formatSpeed(record.speed)} kts
+      Speed: ${formatSpeed(record.speed)} kt<br>
+      Time: ${formatTime(record.time)}
     `;
-
     marker.bindPopup(popupContent);
     marker.addTo(state.map);
     state.markers[idx] = marker;
@@ -476,21 +468,19 @@ function setupTabHandlers() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const tab = btn.dataset.tab;
+      const tabPanel = document.getElementById(`${tab}Tab`);
+      if (!tabPanel) return;
 
       document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
 
-      document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
-      document.getElementById(`${tab}Tab`).classList.add("active");
+      document.querySelectorAll(".tab-content").forEach((panel) => panel.classList.remove("active"));
+      tabPanel.classList.add("active");
 
-      // FIX 1: Ensure map renders properly when tab becomes visible
       if (tab === "map") {
         setTimeout(() => {
-          if (state.map) {
-            state.map.invalidateSize();
-          } else {
-            initializeMap();
-          }
+          if (!state.map) initializeMap();
+          state.map.invalidateSize();
         }, 100);
       }
     });
@@ -518,17 +508,19 @@ function exportToCSV() {
     return;
   }
 
-  // Export ALL columns of the filtered records (dynamic schema)
   const headers = Object.keys(state.displayRecords[0]);
-  const rows = state.displayRecords.map((r) => headers.map((h) => escapeCSV(r[h])));
-
-  const csv = [headers.map(escapeCSV).join(","), ...rows.map((row) => row.join(","))].join("\n");
+  const rows = state.displayRecords.map((record) => headers.map((header) => escapeCSV(record[header])));
+  const csv = [
+    headers.map(escapeCSV).join(","),
+    ...rows.map((row) => row.join(",")),
+  ].join("\n");
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `atm_filtered_${state.displayRecords.length}rows_${new Date().getTime()}.csv`;
+  link.download = `atm_filtered_${state.displayRecords.length}rows_${Date.now()}.csv`;
   link.click();
+  URL.revokeObjectURL(link.href);
 
   setStatus(`Exported ${state.displayRecords.length} filtered records`, false);
 }
@@ -537,22 +529,23 @@ function exportToCSV() {
 // INITIALIZATION
 // ============================================
 
-function initializeApp() {
-  console.log("ATM Analyzer - Initializing...");
-
+document.addEventListener("DOMContentLoaded", () => {
   setupUploadHandlers();
   setupFilterHandlers();
   setupPaginationHandlers();
   setupTabHandlers();
   setupExportHandlers();
 
-  setStatus("Ready", false);
-
-  console.log("✅ Application ready");
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initializeApp);
-} else {
-  initializeApp();
-}
+  // Try to load initial info
+  api.getInfo().then((info) => {
+    if (info.status === "loaded") {
+      updateDatasetInfo(info);
+      initializeMap();
+      loadTableData();
+      elements.clearBtn.disabled = false;
+      elements.exportBtn.disabled = false;
+    }
+  }).catch(() => {
+    // No data loaded yet, normal state
+  });
+});
