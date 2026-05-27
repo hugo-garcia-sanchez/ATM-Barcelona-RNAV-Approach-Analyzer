@@ -61,9 +61,11 @@ def _runway_thr(runway: str | None) -> tuple[float, float] | None:
         return None
     r = str(runway).upper().replace(" ", "")
     if "24L" in r:
-        return rt.THR_24L
-    if "06R" in r:
+        # El despegue por 24L termina en la cabecera opuesta (DER = 06R)
         return rt.THR_06R
+    if "06R" in r:
+        # El despegue por 06R termina en la cabecera opuesta (DER = 24L)
+        return rt.THR_24L
     return None
 
 
@@ -148,7 +150,6 @@ def _runway_from_row(row: pd.Series) -> str | None:
             return r
     return None
 
-
 def build_departures(processed_df: pd.DataFrame) -> list[Departure]:
     """Construye una lista de Departure por callsign con runway 24L/06R."""
     if processed_df is None or processed_df.empty or "callsign" not in processed_df.columns:
@@ -176,8 +177,8 @@ def build_departures(processed_df: pd.DataFrame) -> list[Departure]:
         if track.empty:
             continue
 
-        # Localizar punto de inicio (≥0,5 NM del THR alejándose)
-        start_idx = _find_start_index(track, runway)
+        # Localizar punto de inicio (>=0,5 NM del THR alejándose y posterior a ATOT)
+        start_idx = _find_start_index(track, runway, atot)
 
         deps.append(Departure(
             callsign=str(cs),
@@ -193,19 +194,30 @@ def build_departures(processed_df: pd.DataFrame) -> list[Departure]:
     deps.sort(key=lambda d: (d.runway, d.atot or pd.Timestamp.max))
     return deps
 
-
-def _find_start_index(track: pd.DataFrame, runway: str) -> int | None:
-    """Primer índice cuya distancia al THR sea ≥0,5 NM Y vaya alejándose."""
+def _find_start_index(track: pd.DataFrame, runway: str, atot: pd.Timestamp | None) -> int | None:
+    """Primer índice cuya distancia al DER sea >=0.5 NM, vaya alejándose y sea posterior al ATOT."""
     thr = _runway_thr(runway)
     if thr is None or track.empty:
         return None
+        
     lats = track["latitude"].astype(float).to_numpy()
     lons = track["longitude"].astype(float).to_numpy()
+    times = pd.to_datetime(track["time"])
+    
     dists = np.array([haversine_nm(lat, lon, thr[0], thr[1]) for lat, lon in zip(lats, lons)])
-    # Necesita ≥0,5 NM y derivada positiva (alejándose)
+    
     for i in range(1, len(dists)):
-        if dists[i] >= rt.START_FROM_THR_NM and dists[i] > dists[i - 1]:
+        # 1. Asegurar que la hora es estrictamente posterior al ATOT
+        if atot is not None and times.iloc[i] <= atot:
+            continue
+            
+        # 2. Distancia >= 0.5NM, alejándose (dist[i] > dist[i-1]), 
+        # y forzamos que el punto anterior estuviese a < 0.5NM (como pide el profesor)
+        if (dists[i] >= rt.START_FROM_THR_NM and 
+            dists[i] > dists[i - 1] and 
+            dists[i - 1] < rt.START_FROM_THR_NM):
             return i
+            
     return None
 
 
@@ -235,11 +247,13 @@ def _track_distance_at_time(track: pd.DataFrame, ts: pd.Timestamp) -> tuple[floa
     return float(row["latitude"]), float(row["longitude"]), float(row.get(alt_col, 0.0))
 
 
-def _min_separation_overlap(leader: Departure, follower: Departure) -> tuple[float | None, float | None, str | None]:
+def _min_separation_overlap(
+    leader: Departure, follower: Departure, after_time: str | None = None
+) -> tuple[float | None, float | None, str | None]:
     """Mínima separación radar y mínima Δalt en el solapamiento TMA.
-
-    Returns:
-        (min_nm, min_dalt_ft, min_time) durante el tramo en que ambos están en el filtro.
+    
+    Si after_time está definido, solo evalúa las detecciones estrictamente
+    posteriores a esa hora (para que TMA empiece donde acaba TWR).
     """
     a = leader.track
     b = follower.track
@@ -249,7 +263,15 @@ def _min_separation_overlap(leader: Departure, follower: Departure) -> tuple[flo
     # Solapamiento temporal
     t0 = max(a["time"].iloc[0], b["time"].iloc[0])
     t1 = min(a["time"].iloc[-1], b["time"].iloc[-1])
-    if t0 >= t1:
+    
+    # 1. FORZAR QUE LA BÚSQUEDA SEA POSTERIOR A LA HORA TWR
+    if after_time is not None:
+        t_after = pd.Timestamp(after_time)
+        if t0 <= t_after:
+            # Sumamos 1 segundo para que sea estrictamente "la resta de detecciones"
+            t0 = t_after + pd.Timedelta(seconds=1)
+
+    if t0 > t1:
         return None, None, None
 
     # Filtra ambas series al solapamiento e índiceá por tiempo
@@ -282,7 +304,6 @@ def _min_separation_overlap(leader: Departure, follower: Departure) -> tuple[flo
     min_idx = int(np.nanargmin(d_nm))
     min_time = pd.Timestamp(common[min_idx]).isoformat()
     return float(np.nanmin(d_nm)), float(dalt[min_idx]), min_time
-
 
 def _radar_twr_at_first_sample(leader: Departure, follower: Departure) -> tuple[float | None, float | None, str | None]:
     """Una sola muestra: en el primer fix tras el despegue del follower, distancia
@@ -325,7 +346,6 @@ def _time_gap_first_detection_s(leader: Departure, follower: Departure) -> float
 # ---------------------------------------------------------------------------
 # Pipeline público
 # ---------------------------------------------------------------------------
-
 def compute_separations(processed_df: pd.DataFrame) -> pd.DataFrame:
     """Pipeline completo. Devuelve DataFrame con una fila por par consecutivo."""
     deps = build_departures(processed_df)
@@ -368,7 +388,8 @@ def compute_separations(processed_df: pd.DataFrame) -> pd.DataFrame:
 
             # Radar TMA (distancia mínima durante el solapamiento + Δalt
             # en ese instante)
-            r_tma_min, r_tma_dalt, r_tma_time = _min_separation_overlap(leader, follower)
+            # AQUI ESTA EL CAMBIO: after_time=r_twr_time
+            r_tma_min, r_tma_dalt, r_tma_time = _min_separation_overlap(leader, follower, after_time=r_twr_time)
             r_tma_loss = (
                 r_tma_min is not None and r_tma_dalt is not None
                 and r_tma_min < rt.RADAR_MIN_NM and r_tma_dalt < rt.RADAR_MIN_VERT_FT
