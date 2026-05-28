@@ -497,9 +497,8 @@ def to_csv(df: pd.DataFrame) -> str:
     if df is None or df.empty:
         return ""
     buf = io.StringIO()
-    df.to_csv(buf, index=False)
+    df.to_csv(buf, index=False, sep=';')
     return buf.getvalue()
-
 
 __all__ = [
     "Departure", "SeparationResult",
