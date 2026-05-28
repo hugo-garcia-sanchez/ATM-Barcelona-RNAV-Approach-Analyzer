@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -32,6 +34,43 @@ from ...data_store import (
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 logger = logging.getLogger(__name__)
+
+
+def _safe_token(value: str | None, fallback: str) -> str:
+    if not value:
+        return fallback
+    token = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_-")
+    return token or fallback
+
+
+def _csv_output_path(dataset: str, tag: str | None = None) -> tuple[Path, str]:
+    settings = get_settings()
+    outputs_dir = settings.outputs_dir or (settings.data_root / "outputs")
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    source = get_current_filename()
+    source_stem = Path(source).stem if source else None
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+
+    parts = [
+        _safe_token(dataset, "dataset"),
+        _safe_token(tag, "") if tag else "",
+        _safe_token(source_stem, "mvp"),
+        timestamp,
+    ]
+    parts = [p for p in parts if p]
+    filename = "_".join(parts) + ".csv"
+    return outputs_dir / filename, filename
+
+
+def _csv_response(csv_text: str, dataset: str, tag: str | None = None) -> PlainTextResponse:
+    output_path, filename = _csv_output_path(dataset, tag=tag)
+    output_path.write_text(csv_text, encoding="utf-8")
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{filename}\"",
+        "X-Output-File": filename,
+    }
+    return PlainTextResponse(content=csv_text, media_type="text/csv", headers=headers)
 
 
 def _store_upload_file(upload_file: UploadFile, destination_dir: Path) -> Path:
@@ -301,7 +340,7 @@ def mvp_get_separations(format: str = "json") -> dict[str, object] | PlainTextRe
 
     if format.lower() == "csv":
         csv_text = separations_svc.to_csv(result_df)
-        return PlainTextResponse(content=csv_text, media_type="text/csv")
+        return _csv_response(csv_text, "separations")
 
     if result_df.empty:
         return {"total_pairs": 0, "rows": []}
@@ -337,7 +376,8 @@ def mvp_get_turns(format: str = "json") -> dict[str, object] | PlainTextResponse
         raise HTTPException(status_code=500, detail=f"Turn detection error: {exc}")
 
     if format.lower() == "csv":
-        return PlainTextResponse(content=turn_svc.to_csv(result_df), media_type="text/csv")
+        csv_text = turn_svc.to_csv(result_df)
+        return _csv_response(csv_text, "turns")
 
     if result_df.empty:
         return {"total_departures": 0, "rows": []}
@@ -374,7 +414,9 @@ def mvp_get_nadp(format: str = "json", threshold_kt: float = 30.0) -> dict[str, 
         raise HTTPException(status_code=500, detail=f"NADP classification error: {exc}")
 
     if format.lower() == "csv":
-        return PlainTextResponse(content=nadp_svc.to_csv(result_df), media_type="text/csv")
+        csv_text = nadp_svc.to_csv(result_df)
+        tag = f"{threshold_kt:g}kt"
+        return _csv_response(csv_text, "nadp", tag=tag)
 
     if result_df.empty:
         return {"total_departures": 0, "rows": []}
@@ -412,7 +454,8 @@ def mvp_get_thresholds(format: str = "json") -> dict[str, object] | PlainTextRes
         raise HTTPException(status_code=500, detail=f"Threshold analysis error: {exc}")
 
     if format.lower() == "csv":
-        return PlainTextResponse(content=threshold_svc.to_csv(result_df), media_type="text/csv")
+        csv_text = threshold_svc.to_csv(result_df)
+        return _csv_response(csv_text, "thresholds")
 
     if result_df.empty:
         return {"total": 0, "rows": [], "summary": {}}
@@ -475,7 +518,8 @@ def mvp_get_combined_results(format: str = "json") -> dict[str, object] | PlainT
         raise HTTPException(status_code=500, detail=f"Combined export error: {exc}")
 
     if format.lower() == "csv":
-        return PlainTextResponse(content=combined_svc.to_csv(result_df), media_type="text/csv")
+        csv_text = combined_svc.to_csv(result_df)
+        return _csv_response(csv_text, "combined-results")
 
     if result_df.empty:
         return {"total_departures": 0, "metrics": {}, "rows": []}

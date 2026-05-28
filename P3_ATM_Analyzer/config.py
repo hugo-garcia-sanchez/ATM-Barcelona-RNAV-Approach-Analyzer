@@ -39,6 +39,7 @@ class Settings(BaseModel):
     data_root: Path = Field(default_factory=_default_data_root)
     database_url: str | None = os.getenv("DATABASE_URL") or None
     upload_dir: Path | None = Field(default=None)
+    outputs_dir: Path | None = Field(default=None)
 
 
 @lru_cache
@@ -48,7 +49,10 @@ def get_settings() -> Settings:
         settings.database_url = f"sqlite:///{(settings.data_root / 'app.db').as_posix()}"
     if settings.upload_dir is None:
         settings.upload_dir = settings.data_root / "inputs"
+    if settings.outputs_dir is None:
+        settings.outputs_dir = settings.data_root / "outputs"
 
     settings.data_root.mkdir(parents=True, exist_ok=True)
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     return settings

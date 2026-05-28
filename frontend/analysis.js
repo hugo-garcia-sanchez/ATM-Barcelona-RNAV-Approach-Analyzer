@@ -15,6 +15,161 @@
     el.classList.toggle("busy", busy);
   }
 
+  function ensureToastArea() {
+    let area = document.getElementById("toastArea");
+    if (!area) {
+      area = document.createElement("div");
+      area.id = "toastArea";
+      area.className = "toast-area";
+      document.body.appendChild(area);
+    }
+    return area;
+  }
+
+  function showToast(message, variant = "info", timeoutMs = 3500) {
+    const area = ensureToastArea();
+    const toast = document.createElement("div");
+    toast.className = `toast ${variant}`;
+    toast.textContent = message;
+    area.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add("show"));
+    window.setTimeout(() => {
+      toast.classList.remove("show");
+      window.setTimeout(() => toast.remove(), 200);
+    }, timeoutMs);
+  }
+
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes)) return "0 B";
+    if (bytes < 1024) return `${bytes} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    return `${mb.toFixed(1)} MB`;
+  }
+
+  function getFilenameFromDisposition(headerValue) {
+    if (!headerValue) return null;
+    const match = /filename="?([^";]+)"?/i.exec(headerValue);
+    return match ? match[1] : null;
+  }
+
+  function safeFilenameFromKey(key) {
+    return `${String(key).toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}.csv`;
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function openSavePicker(filename) {
+    return await window.showSaveFilePicker({
+      suggestedName: filename,
+      types: [{
+        description: "CSV",
+        accept: { "text/csv": [".csv"] },
+      }],
+    });
+  }
+
+  async function writeToHandle(handle, blob) {
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+  }
+
+  async function handleCsvDownload(link, label, key) {
+    const url = link.getAttribute("href");
+    if (!url || url === "#") {
+      showToast("CSV no disponible. Ejecuta el analisis primero.", "warning");
+      return;
+    }
+
+    setAnaStatus(`Descargando ${label}...`, true);
+    try {
+      const suggestedName = safeFilenameFromKey(key);
+      let pickerHandle = null;
+      if (window.showSaveFilePicker) {
+        try {
+          pickerHandle = await openSavePicker(suggestedName);
+        } catch (pickerErr) {
+          if (pickerErr && pickerErr.name === "AbortError") {
+            showToast("Guardado cancelado.", "warning");
+            setAnaStatus("Guardado cancelado.", false);
+            return;
+          }
+          throw pickerErr;
+        }
+      }
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        let detail = `Request failed (${response.status})`;
+        try {
+          const err = await response.json();
+          detail = err.detail || detail;
+        } catch (_) {
+          try {
+            const text = await response.text();
+            if (text) detail = text;
+          } catch (_) {}
+        }
+        throw new Error(detail);
+      }
+
+      const blob = await response.blob();
+      const sizeText = formatBytes(blob.size);
+      const outputFile = response.headers.get("X-Output-File");
+      const responseFilename =
+        getFilenameFromDisposition(response.headers.get("content-disposition")) ||
+        outputFile ||
+        suggestedName;
+
+      let savedName = responseFilename;
+      if (pickerHandle) {
+        await writeToHandle(pickerHandle, blob);
+        savedName = pickerHandle.name || responseFilename;
+      } else {
+        triggerDownload(blob, responseFilename);
+      }
+
+      let toastMsg = `CSV listo (${sizeText}) · archivo: ${savedName}`;
+      if (outputFile) toastMsg += ` · servidor: ${outputFile}`;
+      showToast(toastMsg, "success");
+      setAnaStatus("CSV descargado.", false);
+    } catch (err) {
+      console.error(err);
+      showToast(`Error: ${err.message}`, "error", 5000);
+      setAnaStatus(`Error CSV: ${err.message}`, false);
+    }
+  }
+
+  function wireCsvDownloads() {
+    const links = [
+      { id: "csvCombined", label: "combined", key: "combined-results" },
+      { id: "csvSeparations", label: "separations", key: "separations" },
+      { id: "csvTurns", label: "turns", key: "turns" },
+      { id: "csvNadp", label: "nadp", key: "nadp" },
+      { id: "csvThresholds", label: "thresholds", key: "thresholds" },
+    ];
+
+    links.forEach(({ id, label, key }) => {
+      const link = $(id);
+      if (!link) return;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        handleCsvDownload(link, label, key);
+      });
+    });
+  }
+
   function destroyChart(key) {
     if (charts[key]) {
       charts[key].destroy();
@@ -315,6 +470,7 @@
   function init() {
     const btn = $("anaRunBtn");
     if (btn) btn.addEventListener("click", runAll);
+    wireCsvDownloads();
     const thr = $("nadpThreshold");
     if (thr) {
       thr.addEventListener("change", () => {
