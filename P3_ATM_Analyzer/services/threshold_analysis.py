@@ -68,14 +68,67 @@ def _thr_for(runway: str) -> tuple[float, float] | None:
 
 
 def _filter_box(track: pd.DataFrame, thr: tuple[float, float]) -> pd.DataFrame:
+    """Filtra puntos dentro del polígono exacto definido por Google Earth."""
     if track.empty:
         return track
-    lat0, lon0 = thr
-    mask = (
-        (track["latitude"].astype(float).between(lat0 - THR_BOX_HALF_LAT_DEG, lat0 + THR_BOX_HALF_LAT_DEG))
-        & (track["longitude"].astype(float).between(lon0 - THR_BOX_HALF_LON_DEG, lon0 + THR_BOX_HALF_LON_DEG))
+    
+    # Seleccionar el polígono según el threshold
+    if thr == rt.THR_06R:
+        polygon = rt.THR_06R_FILTER_POLYGON
+    elif thr == rt.THR_24L:
+        polygon = rt.THR_24L_FILTER_POLYGON
+    else:
+        # Fallback: caja rectangular para thresholds no mapeados
+        lat0, lon0 = thr
+        mask = (
+            (track["latitude"].astype(float).between(lat0 - THR_BOX_HALF_LAT_DEG, lat0 + THR_BOX_HALF_LAT_DEG))
+            & (track["longitude"].astype(float).between(lon0 - THR_BOX_HALF_LON_DEG, lon0 + THR_BOX_HALF_LON_DEG))
+        )
+        return track.loc[mask].reset_index(drop=True)
+    
+    # Aplicar filtro usando punto en polígono
+    mask = track.apply(
+        lambda r: _point_in_polygon(
+            float(r["latitude"]), float(r["longitude"]), polygon
+        ),
+        axis=1
     )
     return track.loc[mask].reset_index(drop=True)
+
+
+def _point_in_polygon(lat: float, lon: float, polygon: list[tuple[float, float]]) -> bool:
+    """Comprueba si un punto (lat, lon) está dentro de un polígono.
+    
+    Usa el algoritmo de winding number (cuenta cuántas vueltas da el polígono
+    alrededor del punto). Si el número es distinto de cero, el punto está dentro.
+    
+    polygon: lista de (lat, lon) en orden.
+    """
+    if len(polygon) < 3:
+        return False
+    
+    def is_left(p0, p1, p2):
+        """Test si el punto p2 está a la izquierda de la línea p0-p1."""
+        return ((p1[0] - p0[0]) * (p2[1] - p0[1]) - 
+                (p2[0] - p0[0]) * (p1[1] - p0[1]))
+    
+    wn = 0  # winding number
+    n = len(polygon)
+    
+    for i in range(n):
+        p0 = polygon[i]
+        p1 = polygon[(i + 1) % n]
+        
+        if p0[1] <= lon:  # p0 está en el lado izquierdo o en la línea
+            if p1[1] > lon:  # p1 está en el lado derecho
+                if is_left(p0, p1, (lat, lon)) > 0:  # punto a la izquierda de p0->p1
+                    wn += 1
+        else:  # p0 está en el lado derecho
+            if p1[1] <= lon:  # p1 está en el lado izquierdo o en la línea
+                if is_left(p0, p1, (lat, lon)) < 0:  # punto a la derecha de p0->p1
+                    wn -= 1
+    
+    return wn != 0
 
 
 def _interp_at_min_dist(track: pd.DataFrame, thr: tuple[float, float]) -> dict | None:

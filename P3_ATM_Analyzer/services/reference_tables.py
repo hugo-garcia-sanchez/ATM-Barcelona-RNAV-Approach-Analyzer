@@ -309,6 +309,25 @@ RADAR_MIN_VERT_FT: int = 1000
 # Distancia mínima al THR para empezar a contar separación
 START_FROM_THR_NM: float = 0.5
 
+# Filtros poligonales precisos obtenidos de Google Earth (archivo KML)
+# Para DEP 24L → cruce por THR_06R (DER 24L)
+# Puntos en orden consecutivo alrededor del perímetro: SO → NO → NE → SE (lat, lon)
+THR_06R_FILTER_POLYGON: List[Tuple[float, float]] = [
+    (41.28184162884907, 2.073842553715848),    # SO (Suroeste)
+    (41.28231732612866, 2.073550657378966),    # NO (Noroeste)
+    (41.28273950568807, 2.074783575661974),    # NE (Noreste)
+    (41.28229781072012, 2.07516108195364),     # SE (Sureste)
+]
+
+# Para DEP 06R → cruce por THR_24L (DER 06R)
+# Puntos en orden consecutivo alrededor del perímetro: NE → SE → SO → NO (lat, lon)
+THR_24L_FILTER_POLYGON: List[Tuple[float, float]] = [
+    (41.29267734479905, 2.10378231156142),     # NE (Noreste)
+    (41.29220444085804, 2.104090791744397),    # SE (Sureste)
+    (41.29171286022007, 2.102638120459794),    # SO (Suroeste)
+    (41.29217718141881, 2.102371629355491),    # NO (Noroeste)
+]
+
 
 __all__ = [
     "WAKE_CATEGORIES", "WAKE_ALIASES", "normalize_wake",
@@ -321,4 +340,5 @@ __all__ = [
     "TMA_TANGENT_POINT", "TMA_RADIUS_M",
     "GEO_BBOX", "ALT_CEILING_FT",
     "RADAR_MIN_NM", "RADAR_MIN_VERT_FT", "START_FROM_THR_NM",
+    "THR_06R_FILTER_POLYGON", "THR_24L_FILTER_POLYGON",
 ]
