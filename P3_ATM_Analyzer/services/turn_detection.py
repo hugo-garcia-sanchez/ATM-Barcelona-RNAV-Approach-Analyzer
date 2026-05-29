@@ -121,9 +121,21 @@ def _signed_side_r234(lat: float, lon: float) -> float:
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 
 
-def _check_r234_crossing(track: pd.DataFrame) -> tuple[bool, float | None, float | None]:
-    """¿La traza cruza la radial R-234 desde DVOR BCN?
+def _check_r234_crossing(track: pd.DataFrame, turn_idx: int | None = None) -> tuple[bool, float | None, float | None]:
+    """¿La traza cruza la radial R-234 desde DVOR BCN (solo segmento de despegue)?
 
+    IMPORTANTE: Esta función ahora comprueba SOLO el segmento de despegue desde
+    el inicio hasta el índice de viraje (turn_idx). Esto evita falsos positivos
+    causados por cruces que ocurren DESPUES del viraje detectado.
+
+    Parámetros:
+    - track: DataFrame con la traza completa
+    - turn_idx: Índice del inicio del viraje en la traza. 
+        * Si es None: retorna (False, None, None) — no hay viraje detectado,
+          no se puede verificar el segmento de despegue.
+        * Si es int ≥ 0: busca cruce SOLO en el segmento [0:turn_idx+1] (inclusive).
+
+    Algoritmo (sin cambios):
     R-234 es una semirrecta desde DVOR BCN; el segmento DVOR→costa (en el PDF
     pág. 56) es sólo un tramo representativo. Para detectar si una trayectoria
     "atraviesa" la radial usamos el signo del producto cruzado entre la
@@ -131,8 +143,15 @@ def _check_r234_crossing(track: pd.DataFrame) -> tuple[bool, float | None, float
     dos fixes consecutivos = la trayectoria cruzó la recta entre esos dos
     puntos. Es robusto y no depende de la longitud del segmento.
     """
-    lats = track["latitude"].astype(float).to_numpy()
-    lons = track["longitude"].astype(float).to_numpy()
+    # Si no hay viraje detectado, no se puede verificar el segmento de despegue
+    if turn_idx is None:
+        return False, None, None
+
+    # Slice la traza SOLO hasta el índice de viraje (inclusive)
+    segment = track.iloc[:turn_idx + 1]
+    
+    lats = segment["latitude"].astype(float).to_numpy()
+    lons = segment["longitude"].astype(float).to_numpy()
     if len(lats) < 2:
         return False, None, None
 
@@ -281,7 +300,17 @@ def compute_turns(processed_df: pd.DataFrame) -> pd.DataFrame:
         search = sub.loc[search_mask].reset_index(drop=True)
 
         idx, method = _detect_turn_start(search, d.runway)
-        crosses, cx_lat, cx_lon = _check_r234_crossing(sub)
+        
+        # Map turn index from 'search' coordinates back to 'sub' coordinates
+        # (search is filtered, so idx needs to be mapped to the original sub indices)
+        turn_idx_in_sub = None
+        if idx is not None:
+            search_indices_in_sub = np.where(search_mask.values)[0]
+            if idx < len(search_indices_in_sub):
+                turn_idx_in_sub = search_indices_in_sub[idx]
+        
+        # Check R-234 crossing ONLY in the departure segment (0 to turn_idx)
+        crosses, cx_lat, cx_lon = _check_r234_crossing(sub, turn_idx=turn_idx_in_sub)
 
         if idx is None:
             events.append(TurnEvent(
