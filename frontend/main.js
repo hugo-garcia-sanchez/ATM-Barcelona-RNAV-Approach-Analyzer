@@ -406,25 +406,6 @@ function initializeMap() {
     attribution: "© OpenStreetMap contributors",
   }).addTo(state.map);
 
-  // Add runway thresholds
-  L.circleMarker(RUNWAY_24L, {
-    radius: 8,
-    color: "red",
-    fillOpacity: 0.8,
-    fillColor: "red",
-  })
-    .bindPopup(`${RUNWAY_24L.name} - Threshold`)
-    .addTo(state.map);
-
-  L.circleMarker(RUNWAY_06R, {
-    radius: 8,
-    color: "red",
-    fillOpacity: 0.8,
-    fillColor: "red",
-  })
-    .bindPopup(`${RUNWAY_06R.name} - Threshold`)
-    .addTo(state.map);
-
   updateMapMarkers();
 }
 
