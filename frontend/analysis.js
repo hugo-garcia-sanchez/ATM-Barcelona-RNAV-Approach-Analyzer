@@ -69,6 +69,15 @@
     URL.revokeObjectURL(url);
   }
 
+  function hasDesktopCsvSaver() {
+    return !!(window.pywebview && window.pywebview.api && typeof window.pywebview.api.save_csv === "function");
+  }
+
+  async function saveWithDesktopApi(filename, blob) {
+    const text = await blob.text();
+    return await window.pywebview.api.save_csv(filename, text);
+  }
+
   async function openSavePicker(filename) {
     return await window.showSaveFilePicker({
       suggestedName: filename,
@@ -95,19 +104,6 @@
     setAnaStatus(`Descargando ${label}...`, true);
     try {
       const suggestedName = safeFilenameFromKey(key);
-      let pickerHandle = null;
-      if (window.showSaveFilePicker) {
-        try {
-          pickerHandle = await openSavePicker(suggestedName);
-        } catch (pickerErr) {
-          if (pickerErr && pickerErr.name === "AbortError") {
-            showToast("Guardado cancelado.", "warning");
-            setAnaStatus("Guardado cancelado.", false);
-            return;
-          }
-          throw pickerErr;
-        }
-      }
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -133,9 +129,30 @@
         suggestedName;
 
       let savedName = responseFilename;
-      if (pickerHandle) {
-        await writeToHandle(pickerHandle, blob);
-        savedName = pickerHandle.name || responseFilename;
+      if (hasDesktopCsvSaver()) {
+        const result = await saveWithDesktopApi(responseFilename, blob);
+        if (result && result.status === "cancelled") {
+          showToast("Guardado cancelado.", "warning");
+          setAnaStatus("Guardado cancelado.", false);
+          return;
+        }
+        if (result && result.status === "error") {
+          throw new Error(result.message || "No se pudo guardar el CSV");
+        }
+        savedName = (result && result.path) ? result.path : responseFilename;
+      } else if (window.showSaveFilePicker) {
+        try {
+          const pickerHandle = await openSavePicker(responseFilename);
+          await writeToHandle(pickerHandle, blob);
+          savedName = pickerHandle.name || responseFilename;
+        } catch (pickerErr) {
+          if (pickerErr && pickerErr.name === "AbortError") {
+            showToast("Guardado cancelado.", "warning");
+            setAnaStatus("Guardado cancelado.", false);
+            return;
+          }
+          throw pickerErr;
+        }
       } else {
         triggerDownload(blob, responseFilename);
       }

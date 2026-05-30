@@ -483,7 +483,11 @@ function escapeCSV(value) {
   return str;
 }
 
-function exportToCSV() {
+function hasDesktopCsvSaver() {
+  return !!(window.pywebview && window.pywebview.api && typeof window.pywebview.api.save_csv === "function");
+}
+
+async function exportToCSV() {
   if (state.displayRecords.length === 0) {
     alert("No data to export");
     return;
@@ -496,10 +500,31 @@ function exportToCSV() {
     ...rows.map((row) => row.join(",")),
   ].join("\n");
 
+  const filename = `atm_filtered_${state.displayRecords.length}rows_${Date.now()}.csv`;
+
+  if (hasDesktopCsvSaver()) {
+    try {
+      const result = await window.pywebview.api.save_csv(filename, csv);
+      if (result && result.status === "cancelled") {
+        setStatus("Guardado cancelado.", false);
+        return;
+      }
+      if (result && result.status === "error") {
+        throw new Error(result.message || "No se pudo guardar el CSV");
+      }
+      setStatus(`Exported ${state.displayRecords.length} filtered records`, false);
+      return;
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+      setStatus(`Error: ${err.message}`, false);
+      return;
+    }
+  }
+
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `atm_filtered_${state.displayRecords.length}rows_${Date.now()}.csv`;
+  link.download = filename;
   link.click();
   URL.revokeObjectURL(link.href);
 

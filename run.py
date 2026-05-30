@@ -10,6 +10,7 @@ from P3_ATM_Analyzer.app import create_app
 
 
 app = create_app()
+_main_window = None
 
 
 def _configure_linux_webview() -> None:
@@ -61,6 +62,33 @@ def _ensure_stdio() -> None:
 		sys.stderr = open(os.devnull, "w")
 
 
+class DesktopAPI:
+	def save_csv(self, filename: str, content: str) -> dict[str, str]:
+		try:
+			webview = importlib.import_module("webview")
+			create_dialog = getattr(webview, "create_file_dialog", None)
+			if create_dialog is None and _main_window is not None:
+				create_dialog = getattr(_main_window, "create_file_dialog", None)
+			if create_dialog is None:
+				raise AttributeError("create_file_dialog is not available")
+			path = create_dialog(
+				webview.SAVE_DIALOG,
+				save_filename=filename,
+				file_types=("CSV Files (*.csv)",),
+			)
+			if not path:
+				return {"status": "cancelled"}
+			if isinstance(path, (list, tuple)):
+				path = path[0] if path else None
+			if not path:
+				return {"status": "cancelled"}
+			with open(path, "w", encoding="utf-8", newline="") as handle:
+				handle.write(content)
+			return {"status": "saved", "path": str(path)}
+		except Exception as exc:
+			return {"status": "error", "message": str(exc)}
+
+
 if __name__ == "__main__":
 	import uvicorn
 
@@ -88,14 +116,16 @@ if __name__ == "__main__":
 	_wait_for_server(host, selected_port)
 
 	webview = importlib.import_module("webview")
+	api = DesktopAPI()
 
-	webview.create_window(
+	_main_window = webview.create_window(
 		title="P3 ATM Analyzer",
 		url=f"http://{host}:{selected_port}/",
 		width=900,
 		height=600,
 		resizable=True,
 		min_size=(900, 600),
+		js_api=api,
 	)
 	webview.start(gui="qt")
 	server.should_exit = True
