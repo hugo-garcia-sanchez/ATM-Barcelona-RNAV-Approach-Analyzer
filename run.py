@@ -68,7 +68,7 @@ if __name__ == "__main__":
 
 	server = uvicorn.Server(
 		uvicorn.Config(
-			"run:app",
+			app,
 			host=host,
 			port=selected_port,
 			reload=False,
