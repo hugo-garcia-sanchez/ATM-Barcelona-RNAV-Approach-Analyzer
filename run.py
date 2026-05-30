@@ -54,9 +54,17 @@ def _wait_for_server(host: str, port: int, timeout_seconds: float = 20.0) -> Non
 	raise RuntimeError(f"API server did not become ready: {last_error}")
 
 
+def _ensure_stdio() -> None:
+	if sys.stdout is None:
+		sys.stdout = open(os.devnull, "w")
+	if sys.stderr is None:
+		sys.stderr = open(os.devnull, "w")
+
+
 if __name__ == "__main__":
 	import uvicorn
 
+	_ensure_stdio()
 	_configure_linux_webview()
 
 	host = os.getenv("UVICORN_HOST", "127.0.0.1")
