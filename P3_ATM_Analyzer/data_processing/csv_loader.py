@@ -161,10 +161,17 @@ class CSVLoader:
             raise ValueError("Missing longitude column (looking for 'lon', 'longitude', etc.)")
         col_mapping["longitude"] = lon_col
 
-        # Find altitude column
-        alt_col = next((c for c in found_columns if "alt" in c or "h(ft)" in c or "h(m)" in c), None)
+        # Find altitude column - PRIORITIZE h_ft (height in feet) over h_m (height in meters)
+        # These are set by _map_asterix_columns(), then fall back to generic "alt" patterns
+        # while explicitly excluding "baro_alt_rate" which is barometric altitude rate, not altitude
+        alt_col = next((c for c in found_columns if c == "h_ft"), None)  # First priority: feet
         if not alt_col:
-            raise ValueError("Missing altitude column (looking for 'alt', 'altitude', 'h(ft)', 'h(m)', etc.)")
+            alt_col = next((c for c in found_columns if c == "h_m"), None)  # Second priority: meters
+        if not alt_col:
+            # Fallback to generic altitude patterns, but exclude barometric altitude rate
+            alt_col = next((c for c in found_columns if "alt" in c and "baro" not in c), None)
+        if not alt_col:
+            raise ValueError("Missing altitude column (looking for 'h_ft', 'h_m', or 'alt', etc.)")
         col_mapping["altitude"] = alt_col
 
         # Find time column
