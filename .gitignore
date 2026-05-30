@@ -43,4 +43,4 @@ test_fixes.py
 # Archivos de sistema
 Thumbs.db
 desktop.ini
-data/outputs
+data/outputs/

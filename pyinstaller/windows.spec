@@ -57,7 +57,6 @@ multipart_meta = (
 all_datas = (
     [(os.path.join(ROOT, 'frontend'), 'frontend')]
     + [(os.path.join(ROOT, 'data', 'inputs'), os.path.join('data', 'inputs'))]
-    + [(os.path.join(ROOT, 'data', 'outputs'), os.path.join('data', 'outputs'))]
     + uv_d + st_d + fa_d + ws_d + wv_d + pn_d + cl_d
     + mp_d + mp2_d
     + multipart_meta
