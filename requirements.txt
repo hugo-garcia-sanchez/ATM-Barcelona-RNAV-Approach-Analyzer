@@ -9,3 +9,4 @@ pywebview
 QtPy
 PyQt6
 PyQt6-WebEngine
+pyinstaller
